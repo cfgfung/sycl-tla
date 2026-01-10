@@ -225,6 +225,7 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
   cutlass::DeviceAllocation<ElementV> block_V_cache;
   cutlass::DeviceAllocation<ElementO> block_O;
   cutlass::DeviceAllocation<ElementO> block_ref_O;
+  cutlass::DeviceAllocation<float> block_LSE;
 
   std::vector<int> cumulative_seqlen_q;
   std::vector<int> cumulative_seqlen_kv;
@@ -630,6 +631,7 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
     block_V_cache.reset(static_cast<std::size_t>(batch) * num_heads_kv * seq_len_kv_cache * head_size_vo);
     block_O.reset(static_cast<std::size_t>(batch) * num_heads_q * seq_len_qo * head_size_vo);
     block_ref_O.reset(static_cast<std::size_t>(batch) * num_heads_q * seq_len_qo * head_size_vo);
+    block_LSE.reset(static_cast<std::size_t>(batch) * num_heads_q * seq_len_qo);
     // Zero-initialize output buffer for the kernel result
     // block_ref_O is fully written in verify() before being read, so no initialization needed
     compat::memset(block_O.get(), 0, block_O.size() * sizeof_bits_v<ElementO> / 8);
@@ -735,6 +737,7 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
         block_O.get(), stride_O,
         block_K_cache.get(), stride_K_cache,
         block_V_cache.get(), stride_V_cache,
+        block_LSE.get(),
       },
       {
         options.softmax_scale,
@@ -769,6 +772,17 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
       run(params);
     }
     compat::wait();
+
+    print("\n ================================= \n");
+    std::vector<float> device_LSE(block_LSE.size());
+    compat::wait();
+    compat::memcpy<float>(device_LSE.data(), block_LSE.get(),
+                              block_LSE.size());
+    print("\n Device LSE \n");
+    for (int i = 0; i < device_LSE.size(); i++){
+      print(device_LSE[i]);
+      print('\n');
+    }
 
     if (options.verify != 0) {
       // Verify that the result is correct

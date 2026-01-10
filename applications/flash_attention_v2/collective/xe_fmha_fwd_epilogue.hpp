@@ -143,7 +143,9 @@ public:
              FragARow       & tA_max,   // Softmax row-wise max accumulator
              FragARow       & tA_sum,   // Softmax row-wise sum accumulator
              QVCoord          blk_qv,   // WG tile indices: (q,v)
-             int              thr_id) { // Work-item ID
+             int              thr_id,   // Work-item ID
+             float*           pLSE,     // Global LSE Ptr
+             const std::tuple<int, int, int, int, int>& metadata_for_lse) {   // Metadata for LSE to calculate offset
 
     using namespace cute;
     using ElementA = typename FragA::element_type;
@@ -157,11 +159,13 @@ public:
     /* Complete softmax, dividing out sums. */
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < rA_sum.size(); i++)
-      rA_sum(i) = ElementA(1) / rA_sum(i);
+      rA_sum(i) = ElementA(1) / rA_sum(i);  // The recipocal 
+
+      //rA_sum(i) == cur_scale
 
     CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < rA.size(); i++)
-      rA(i) *= broadcast<0>(rA_sum, rA, i);
+    for (int i = 0; i < rA.size(); i++) // rA.size is 64
+      rA(i) *= broadcast<0>(rA_sum, rA, i); // equivalent to *= curScale
 
     /* Tile output */
     Tensor cO = make_identity_tensor(O.shape());          // (q,v)
@@ -177,6 +181,38 @@ public:
     /* Reorder tile and write out */
     reorder(rA, tOrO);
     copy(copy_o, tOrO, tOgO);
+
+    /* Calculate the LSE*/
+    auto sg = compat::get_nd_item<1>().get_sub_group();
+    int lane_id = static_cast<int>(sg.get_local_linear_id());
+    int sub_group_id = get_sub_group_id();
+    int subgroup_size = sg.get_max_local_range()[0]; //16
+
+    // const int BLK_M = size(select<0>(TileShapeOutput{}));
+    // auto blk_m_coord = get<0>(tile_coord); // seq_len_blk_idx
+    // size_t lse_offset =
+    //     k_coord * num_heads_q * seq_len_qo + // shift the batch -- batch_idx *
+    //                                          // num_heads_q * seq_len_qo
+    //     q_head_coord * seq_len_qo + // shift the head  -- head_q * seq_len_qo
+    //     m_coord * BLK_M;            // shift to the particular tile
+    // int localtile_seq_coord = 0;
+    // localtile_seq_coord = sub_group_id * SubgroupSize +
+    //                       lane_id; // one subgroup will handle 16 sequence
+    // int seq_coord = m_coord * BLK_M + localtile_seq_coord;
+    // // Check that if this is within the seq_len_qo
+    // if (seq_coord < seq_len_qo) {
+    //   auto cur_sum = rowsum[lane_id];
+    //   tLSE_reg =
+    //       cur_sum == 0.f ? -INFINITY : max * softmax_scale + logf(cur_sum);
+    //   *(params.ptr_LSE + lse_offset + localtile_seq_coord) =
+    //       std::isnan(tLSE_reg) ? 0 : tLSE_reg;
+
+    size_t lse_offset = 0;
+    *(pLSE + lse_offset) = 1;
+
+    
+
+    
   }
 
   // Reduce k-blocks of A and A_sum across WG, if needed.
