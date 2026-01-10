@@ -82,7 +82,7 @@ int main(int argc, const char **argv) {
   using SubgroupLayoutQK = Layout<Shape<_1, _1, _1>>;
 
 #elif HEAD_DIM == 64
-  using ShapeQK = Shape<_128, _64, _32>;
+  using ShapeQK = Shape<_128, _64, _32>;     // Assume v = head dim , q = sequence length, 
   using ShapePV = Shape<_128, _32, _64>;
   using ShapeOut = Shape<_128, _64>;
   using SubgroupLayoutQK = Layout<Shape<_8, _1, _1>>;
