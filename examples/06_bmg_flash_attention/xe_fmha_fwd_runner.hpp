@@ -199,6 +199,7 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
   using ElementK = typename FMHAKernel::ElementK;
   using ElementV = typename FMHAKernel::ElementV;
   using ElementO = typename FMHAKernel::ElementO;
+  using ElementAccumulator = float;
 
   using CollectiveMainloop = typename FMHAKernel::CollectiveMainloop;
   using ElementS = typename CollectiveMainloop::ElementS;
@@ -226,6 +227,7 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
   cutlass::DeviceAllocation<ElementO> block_O;
   cutlass::DeviceAllocation<ElementO> block_ref_O;
   cutlass::DeviceAllocation<float> block_LSE;
+  cutlass::DeviceAllocation<float> block_ref_LSE;
 
   std::vector<int> cumulative_seqlen_q;
   std::vector<int> cumulative_seqlen_kv;
@@ -318,7 +320,7 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
     return cute::make_tuple(problem_size_for_init, problem_size_for_launch);
   }
 
-  bool verify(ProblemShapeType shape, bool is_causal) {
+  bool verify(ProblemShapeType shape, bool is_causal, float softmax_scale) {
 
     if constexpr (isVarLen) {
       int max_seq_len_q = shape.seq_len_qo;
@@ -342,6 +344,8 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
     auto block_K_cache_ = in_memory(block_K_cache);
     auto block_V_cache_ = in_memory(block_V_cache);
 
+    std::vector<float> host_LSE(block_ref_LSE.size());
+
     using ElementV_ = std::remove_pointer_t<decltype(block_V_.get())>;
     using ElementK_ = std::remove_pointer_t<decltype(block_K_.get())>;
 
@@ -351,6 +355,7 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
     int offset_k_cache = 0;
     int offset_v_cache = 0;
     int offset_o = 0;
+    int offset_lse = 0;
 
     std::vector<int> page_table_host;
     std::vector<int> num_pages_per_seq_host;
@@ -486,6 +491,52 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
           }
         }
 
+        // calculate scaled qk score for LSE
+        std::vector<ElementAccumulator> qkscore_scaled(
+            host_S.size(), ElementAccumulator{0});
+        for (int row = 0; row < seq_len_qo; row++) {
+          for (int col = 0; col < seq_len_kv; col++) {
+            qkscore_scaled[col + row * seq_len_kv] =
+                host_S[col + row * seq_len_kv] *
+                softmax_scale; // (qkscore * scale) - max_row
+          }
+        }
+
+        // compute max element per row of scaled qk
+        std::vector<ElementAccumulator> max_scaled_lse_vec(
+            seq_len_qo, ElementAccumulator{-INFINITY});
+        for (int row = 0; row < seq_len_qo; row++) {
+          int idx = row * seq_len_kv;
+          int max_idx = row;
+          max_scaled_lse_vec[max_idx] = qkscore_scaled[idx++];
+          for (int col = 1; col < seq_len_kv; col++, idx++) {
+            if (max_scaled_lse_vec[max_idx] < qkscore_scaled[idx])
+              max_scaled_lse_vec[max_idx] = qkscore_scaled[idx];
+          }
+        }
+
+        // subtract scaled qk by max_row
+        for (int row = 0; row < seq_len_qo; row++) {
+          for (int col = 0; col < seq_len_kv; col++) {
+            qkscore_scaled[col + row * seq_len_kv] =
+                qkscore_scaled[col + row * seq_len_kv] -
+                max_scaled_lse_vec[row]; // (qkscore * scale) - max_row
+          }
+        }
+
+        // calculate LSE
+        for (int row = 0; row < seq_len_qo; row++) {
+          ElementAccumulator sum_exp = 0;
+          for (int col = 0; col < seq_len_kv; col++) {
+            sum_exp += expf(qkscore_scaled[col + row * seq_len_kv]);
+          }
+          host_LSE[row + offset_lse] =
+              std::isnan(max_scaled_lse_vec[row] + logf(sum_exp))
+                  ? 0
+                  : host_LSE[row + offset_lse] =
+                        max_scaled_lse_vec[row] + logf(sum_exp);
+        }
+
         // compute exp of S
         for (int row = 0; row < seq_len_qo; row++) {
           int idx = row * seq_len_kv_total;
@@ -558,6 +609,8 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
         compat::memcpy<ElementO>(block_ref_O.get() + offset_o, vec_out.data(), vec_out.size());
 
         offset_q += seq_len_qo * head_size_qk;
+        offset_lse += seq_len_qo;
+        
         if(kv_group_update % q_group_size==0) {
           offset_k += seq_len_kv * head_size_qk;
           offset_v += seq_len_kv * head_size_vo;
@@ -575,6 +628,23 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
     bool passed = cutlass::reference::device::BlockCompareRelativelyEqual(block_ref_O.get(), block_O.get(),
                                                                           block_O.size(), ElementO{0.05}, ElementO{0.05});
 
+    print("\n ================================= \n");
+    print("\n host LSE \n");
+    for (int i = 0; i < host_LSE.size(); i++){
+      print(host_LSE[i]);
+      print('\n');
+    }
+    
+    std::vector<float> device_LSE(block_LSE.size());
+    compat::wait();
+    compat::memcpy<float>(device_LSE.data(), block_LSE.get(),
+                              block_LSE.size());
+    print("\n Device LSE \n");
+    for (int i = 0; i < device_LSE.size(); i++){
+      print(device_LSE[i]);
+      print('\n');
+    }
+    
     return passed;
   }
 
@@ -624,6 +694,8 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
     block_O.reset(static_cast<std::size_t>(batch) * num_heads_q * seq_len_qo * head_size_vo);
     block_ref_O.reset(static_cast<std::size_t>(batch) * num_heads_q * seq_len_qo * head_size_vo);
     block_LSE.reset(static_cast<std::size_t>(batch) * num_heads_q * seq_len_qo);
+    block_ref_LSE.reset(static_cast<std::size_t>(batch) * num_heads_q *seq_len_qo);
+
     // Zero-initialize output buffer for the kernel result
     // block_ref_O is fully written in verify() before being read, so no initialization needed
     compat::memset(block_O.get(), 0, block_O.size() * sizeof(ElementO));
@@ -765,20 +837,9 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
     }
     compat::wait();
 
-    print("\n ================================= \n");
-    std::vector<float> device_LSE(block_LSE.size());
-    compat::wait();
-    compat::memcpy<float>(device_LSE.data(), block_LSE.get(),
-                              block_LSE.size());
-    print("\n Device LSE \n");
-    for (int i = 0; i < device_LSE.size(); i++){
-      print(device_LSE[i]);
-      print('\n');
-    }
-
     if (options.verify != 0) {
       // Verify that the result is correct
-      bool passed = verify(shape, options.is_causal);
+      bool passed = verify(shape, options.is_causal, options.softmax_scale);
       std::cout << "Disposition: " << (passed ? "Passed" : "Failed") << std::endl;
 
       if (!passed) {

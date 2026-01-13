@@ -153,6 +153,10 @@ public:
     // Reduce k-blocks of A and A_sum across WG, if needed.
     auto [rA, rA_sum, active] = reduce_A(tArA, tA_max, tA_sum, thr_id);
 
+    auto sg = compat::get_nd_item<1>().get_sub_group();
+    int lane_id = static_cast<int>(sg.get_local_linear_id());
+    int sub_group_id = sg.get_group_id()[0];
+
     /* Some subgroups may not have any work to do; if so, quit early. */
     if (!active) return;
 
@@ -183,36 +187,74 @@ public:
     copy(copy_o, tOrO, tOgO);
 
     /* Calculate the LSE*/
-    auto sg = compat::get_nd_item<1>().get_sub_group();
-    int lane_id = static_cast<int>(sg.get_local_linear_id());
-    int sub_group_id = get_sub_group_id();
+    auto [blk_q, num_heads_q, seq_len_qo, batch_idx, q_head_idx] = metadata_for_lse;
+    int blk_q_coord = get<0>(blk_qv);
+    // auto sg = compat::get_nd_item<1>().get_sub_group();
+    // int lane_id = static_cast<int>(sg.get_local_linear_id());
+    // int sub_group_id = sg.get_group_id()[0];
     int subgroup_size = sg.get_max_local_range()[0]; //16
 
     // const int BLK_M = size(select<0>(TileShapeOutput{}));
     // auto blk_m_coord = get<0>(tile_coord); // seq_len_blk_idx
-    // size_t lse_offset =
-    //     k_coord * num_heads_q * seq_len_qo + // shift the batch -- batch_idx *
-    //                                          // num_heads_q * seq_len_qo
-    //     q_head_coord * seq_len_qo + // shift the head  -- head_q * seq_len_qo
-    //     m_coord * BLK_M;            // shift to the particular tile
-    // int localtile_seq_coord = 0;
-    // localtile_seq_coord = sub_group_id * SubgroupSize +
-    //                       lane_id; // one subgroup will handle 16 sequence
-    // int seq_coord = m_coord * BLK_M + localtile_seq_coord;
+    size_t lse_offset =
+        batch_idx * num_heads_q * seq_len_qo + // shift the batch -- batch_idx *
+                                             // num_heads_q * seq_len_qo
+        q_head_idx * seq_len_qo + // shift the head  -- head_q * seq_len_qo
+        blk_q_coord * blk_q;            // shift to the particular tile
+    int localtile_seq_coord = 0;
+    localtile_seq_coord = sub_group_id * subgroup_size + lane_id; // one subgroup will handle 16 sequence
+
+    // if (sub_group_id == 0){
+    //   // print("sub_group_id: "); print(sub_group_id); print('\n');   
+    //   print("sub_group_id == 0"); print('\n');
+    // }
+
+  //   if (lane_id == 0 && sub_group_id == 0){
+  //     print("lse offset: ");
+  //     print(lse_offset);
+  //     print("\n");
+
+  //     print("seq_len_qo: ");
+  //     print(seq_len_qo);
+  //     print("\n");
+
+  //     print("blk_q: ");
+  //     print(blk_q);
+  //     print("\n");
+
+  //     print("q_head_idx: ");
+  //     print(q_head_idx);
+  //     print("\n");
+
+  //     print("batch_idx: ");
+  //     print(batch_idx);
+  //     print("\n");
+
+  //     print("blk_q_coord: ");
+  //     print(blk_q_coord);
+  //     print("\n");
+
+  //     print("localtile_seq_coord: ");
+  //     print(localtile_seq_coord);
+  //     print("\n");
+  // }
+    
+    // int seq_coord = blk_q_coord * blk_q + localtile_seq_coord;
     // // Check that if this is within the seq_len_qo
     // if (seq_coord < seq_len_qo) {
-    //   auto cur_sum = rowsum[lane_id];
-    //   tLSE_reg =
-    //       cur_sum == 0.f ? -INFINITY : max * softmax_scale + logf(cur_sum);
-    //   *(params.ptr_LSE + lse_offset + localtile_seq_coord) =
-    //       std::isnan(tLSE_reg) ? 0 : tLSE_reg;
+    //   // auto cur_sum = rowsum[lane_id];
+    //   // tLSE_reg =
+    //   //     cur_sum == 0.f ? -INFINITY : max * softmax_scale + logf(cur_sum);
+    //   // *(params.ptr_LSE + lse_offset + localtile_seq_coord) =
+    //   //     std::isnan(tLSE_reg) ? 0 : tLSE_reg;
+    //   // *(pLSE + lse_offset + localtile_seq_coord) = seq_coord;
+    // }
 
-    size_t lse_offset = 0;
-    *(pLSE + lse_offset) = 1;
+    // *(pLSE + lse_offset + localtile_seq_coord) = seq_coord;
 
-    
+    // size_t lse_offset = 0;
+    // *(pLSE + lse_offset) = 1;
 
-    
   }
 
   // Reduce k-blocks of A and A_sum across WG, if needed.
