@@ -533,8 +533,10 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
           host_LSE[row + offset_lse] =
               std::isnan(max_scaled_lse_vec[row] + logf(sum_exp))
                   ? 0
-                  : host_LSE[row + offset_lse] =
-                        max_scaled_lse_vec[row] + logf(sum_exp);
+                  // : host_LSE[row + offset_lse] =
+                  //       max_scaled_lse_vec[row] + logf(sum_exp);
+                  : host_LSE[row + offset_lse] = max_vec[row]; // For debuging the mapping of LSE in epilogue
+                  //: host_LSE[row + offset_lse] = logf(sum_exp); // For debuging the mapping of LSE in epilogue
         }
 
         // compute exp of S
