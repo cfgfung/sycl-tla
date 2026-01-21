@@ -53,7 +53,7 @@ using namespace cute;
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <class DispatchPolicy_,
-          bool CausalMask_,
+          bool CausalMask_,F
           bool CachedKV_,
           bool PagedKV_,
           class TiledMMAQK_,          // Tiling for Q*K GEMM
@@ -213,8 +213,11 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
              int              l_coord,
              int              full_tile_offset,
              int              discard_seq_coord,
+             FragARow         & tA_unscaled_rowmax,
+             int              & tile_row_idx,
             TensorK_cache2D const& K_cache_2D = TensorK_cache2D{},
-            TensorV_cache2D const& V_cache_2D = TensorV_cache2D{}) {
+            TensorV_cache2D const& V_cache_2D = TensorV_cache2D{}
+            ) {
     using namespace sycl::ext::oneapi::this_work_item;
 
     // Short dimension names:
@@ -345,7 +348,51 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
       if constexpr (is_cache) {
         k_idx = K;
         if constexpr (PagedKV) {
-          k_idx = get_physical_k_tile(K, l_coord, seq_len_kv_cache);
+          physical_K_tile = get_physical_k_tile(K, l_coord, seq_len_kv_cache);
+        }
+
+        /* GEMM 1: S = K * Q */
+        clear(tSrS);
+        CUTLASS_PRAGMA_UNROLL
+        for (int D = 0; D < size<4>(tKgK); D++) {
+          copy(copy_q, tQgQ(_,_,_,D),   tQrQ);
+          copy(copy_k_cache, tKgK_cache(_,_,_,physical_K_tile,D), tKrK);
+          reorder(tQrQ, tSrQ);
+          reorder(tKrK, tSrK);
+          cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
+        }
+
+        /* V prefetch for GEMM 2 */
+        prefetch(prefetch_v_cache, pVgV_cache(_,_,_,physical_K_tile));
+
+        /* Apply softmax and scaling */
+        softmax(K == blk_k0, tSrS, tA_max, tA_sum, tArA, tA_unscaled_rowmax);
+        reorder(tSrS, tArP);
+
+        /* GEMM 2: A += P * V, split in v dimension */
+        CUTLASS_PRAGMA_UNROLL
+        for (int VV = 0; VV < VTiles; VV++) {
+          copy(copy_v_cache, tVgV_cache(_,_,_,VV,physical_K_tile), tVrV);
+          reorder(tVrV, tArV);
+          cute::gemm(mma_pv, tArP, tArV, tArA(_,_,_,VV));
+        }
+
+        /* K prefetch */
+        for (int D = 0; D < size<4>(pKgK); D++) {
+          int K_next = K + Stages;
+          bool is_cache_next = K_next < kblocks_cache;
+          int physical_K_next = K_next;
+          if constexpr (PagedKV) {
+            if (is_cache_next) {
+              physical_K_next = get_physical_k_tile(K_next, l_coord, seq_len_kv_cache);
+            }
+          }
+
+          if (is_cache_next) {
+            prefetch(prefetch_k_cache, pKgK_cache(_,_,_,physical_K_next,D));
+          } else {
+            prefetch(prefetch_k, pKgK(_,_,_,K_next-kblocks_cache,D));
+          }
         }
       } else {
         k_idx = K - kblocks_cache;
@@ -374,10 +421,10 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
           // Need to get global col and row indices to mask the elements
           Tensor cPgP = make_identity_tensor(make_shape(seq_len, seq_len));
           Tensor gP = local_tile(cPgP, take<0,2>(TileShapeQK{}), make_coord(get<0>(blk_qv), K));
-          auto cS_thread = thr_mma_qk.partition_C(gP);
+          auto cS_thread = thr_mma_qk.partition_C(gP); // Get back the coordinate for tensor C (P)
           CUTLASS_PRAGMA_UNROLL
           for (int i = 0; i < tSrS.size(); ++i) {
-            int row_idx = get<0>(cS_thread(i));
+            int row_idx = get<0>(cS_thread(i)); // From register to get back global coordinates
             int col_idx = get<1>(cS_thread(i));
             if (col_idx - seq_len_kv_cache - full_tile_offset > row_idx - discard_seq_coord) {
               tSrS(i) = ElementS(-INFINITY);
@@ -385,25 +432,57 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
           }
         }
       }
-      /* k masking for remainder tiles */
-      if constexpr (!is_cache) {
-        if (check_remainder_k && K == total_blk - 1) {
-          FragSRow k_rem_mask;
-          int k_val = get<0>(tKgK_cur(0,0,0,k_idx,0)) + kblocks_cache * get<1>(TileShapeQK{});
-          int k = k_val + get_sub_group().get_local_id()[0];
-          CUTLASS_PRAGMA_UNROLL
-          for (int i = 0; i < k_rem_mask.size(); i++, k += intel::sg_size) {
-            k_rem_mask(i) = (k < seq_len) ? ElementS(sycl::nan(0u)) : ElementS(-INFINITY);
-          }
-          CUTLASS_PRAGMA_UNROLL
-          for (int i = 0; i < tSrS.size(); i++) {
-            tSrS(i) = sycl::fmin(tSrS(i), broadcast<1>(k_rem_mask, tSrS, i));
-          }
+      /* k masking for remainder tiles */ // When it is not fully divisible by QK.
+      if (check_remainder_k && K == total_blk - 1) {
+        FragSRow k_rem_mask;
+        int k_val = get<0>(tKgK(0,0,0,K-kblocks_cache,0)) + kblocks_cache * get<1>(TileShapeQK{});
+        int k = k_val + get_sub_group().get_local_id()[0];
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < k_rem_mask.size(); i++, k += intel::sg_size) {
+          k_rem_mask(i) = (k < seq_len) ? ElementS(sycl::nan(0u)) : ElementS(-INFINITY);
+        }
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < tSrS.size(); i++) {
+          tSrS(i) = sycl::fmin(tSrS(i), broadcast<1>(k_rem_mask, tSrS, i));
         }
       }
 
+      // Try to get the vertical offset for that thread within a tile
+          auto m_size = get<0>(tSrS.shape()); // Find out how many existing row maximum
+          // There is an implicit mapping that lane_id 0 will map to the first row maxima
+          auto sg = compat::get_nd_item<1>().get_sub_group();
+          int lane_id = static_cast<int>(sg.get_local_linear_id());
+
+          if (lane_id < m_size){
+            auto coord_tensor = make_identity_tensor(TileShapePV{});
+            auto thr_mma = thr_mma_pv.get_slice(thr_id);
+            auto tC_coords = thr_mma.partition_C(coord_tensor);
+            auto coord = tC_coords(lane_id); 
+            tile_row_idx = get<0>(coord);
+          }
+
+      // if (K== blk_k0 && cute::thread(0,0)){
+
+
+
+        // auto coord_tensor = make_identity_tensor(TileShapePV{});
+        // auto thr_mma = thr_mma_pv.get_slice(thr_id);
+        // auto tC_coords = thr_mma.partition_C(coord_tensor);
+        // for (int i = 0; i < size(tC_coords); ++i) {
+        //     // auto coord = tC_coords(i); // This is a tuple, e.g., (row, col)
+        //     // int row = get<0>(coord);   // Current Row relative to the Tile
+        //     // int col = get<1>(coord);   // Current Column relative to the Tile
+
+        //     // print("row: ");
+        //     // print(row);
+        //     // print(" col: ");
+        //     // print(col);
+        //     // print('\n');
+        // }   
+      // }
+
       /* Apply softmax and scaling */
-      softmax(K == blk_k0, tSrS, tA_max, tA_sum, tArA);
+      softmax(K == blk_k0, tSrS, tA_max, tA_sum, tArA, tA_unscaled_rowmax);
       reorder(tSrS, tArP);
 
       /* GEMM 2: A += P * V, split in v dimension */
@@ -454,6 +533,13 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
     }
   }
 
+  // Calculate the local row index within a tile
+  // This local row index will be used for calculating the offset for LSE pointer
+  CUTLASS_DEVICE
+  void get_tile_row_idx() {
+    
+  }
+
   // Single step of blocked softmax.
   CUTLASS_DEVICE
   void
@@ -461,12 +547,26 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
           FragS    & tS,          // Softmax src/dst block
           FragSRow & tS_max,      // Softmax row-wise max accumulator
           FragSRow & tS_sum,      // Softmax row-wise sum accumulator
-          FragA    & tA) {        // O accumulator (for rescaling)
+          FragA    & tA,          // O accumulator (for rescaling)
+          FragSRow & tS_unscaled_max      // the unscaled row max
+          ) {        
 
     /* Compute row-wise maxima for this block */
     auto tS_bmax = reduce<1>(tS, sycl::maximum{});
 
-    FragSRow rescale;
+    // if (cute::thread(7,0)){
+    //   print("tS: \n" );
+    //   print_tensor(tS);
+    //   print(' ');
+    //   print("tS_max: \n" );
+    //   print_tensor(tS_max);
+    //   print(' ');
+    //   print("tS_bmax: \n" );
+    //   print_tensor(tS_bmax);
+    //   print(' ');
+    // }
+    /* Update (scaled) maxima */
+    auto tS_prev_max = tS_max;
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tS_max.size(); i++) {
       ElementS new_max = sycl::max(tS_max(i), params.scale * tS_bmax(i));
@@ -474,15 +574,22 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
       tS_max(i) = new_max;
     }
 
+    /* Find the unscaled row maxima*/
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < tS_unscaled_max.size(); i++) {
+      tS_unscaled_max(i) = sycl::max(tS_unscaled_max(i), tS_bmax(i));
+    }
+
     /* Scale S and subtract maxima, then exponentiate */
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tS.size(); i++)
-      tS(i) = sycl::native::exp2(params.scale * tS(i) - broadcast<0>(tS_max, tS, i));
+      tS(i) = sycl::native::exp2(params.scale * tS(i) - broadcast<0>(tS_max, tS, i)); // Local exponentials
 
     /* Rescale existing S sums and O accumulator */
     if (!first_block) {
       CUTLASS_PRAGMA_UNROLL
-      for (int i = 0; i < tS_sum.size(); i++) {
+      for (int i = 0; i < tS_max.size(); i++) {
+        rescale(i) = sycl::native::exp2(tS_prev_max(i) - tS_max(i)); // 
         tS_sum(i) *= rescale(i);
       }
 
@@ -492,9 +599,8 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
     }
 
     /* Update sums */
-    auto tS_bsum = reduce<1>(tS, sycl::plus<void>{});
-    CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < tS_sum.size(); i++)
+    auto tS_bsum = reduce<1>(tS, sycl::plus<void>{}); // local sum
+    for (int i = 0; i < tS_sum.size(); i++)           // Add for each row
       tS_sum(i) += tS_bsum(i);
   }
 };

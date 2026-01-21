@@ -279,7 +279,8 @@ public:
 
       // O accumulator types
       FragA tArA;
-      FragARow tA_max, tA_sum;
+      FragARow tA_max, tA_sum, tA_unscaled_rowmax;
+      int tile_row_idx = -1;
 
       // Main loop
       int l_coord = is_var_len ? 0 : idx_b;
@@ -290,9 +291,10 @@ public:
                tArA, tA_max, tA_sum,
                blk_qv, 0, k_blocks, k_blocks,
                thr_id, seq_len, seq_len_kv_cache, idx_b,
-               full_tile_offset, discard_seq_coord,
+               full_tile_offset, discard_seq_coord, tA_unscaled_rowmax, tile_row_idx,
                K_cache(_,_,head,l_coord),
-               V_cache(_,_,head,l_coord));
+               V_cache(_,_,head,l_coord)
+               );
 
       if constexpr (!is_empty_v<MainloopSharedStorage> && !is_empty_v<EpilogueSharedStorage>) {
         sycl::group_barrier(get_work_group<3>());
@@ -303,7 +305,8 @@ public:
       auto metadata_for_lse = std::make_tuple(get<0>(TileShapePV{}), s.num_heads_q , seq_len_qo, idx_b, head_q);
       epilogue(O(_,_,head_q,l_coord),
                tArA, tA_max, tA_sum,
-               blk_qv, thr_id, dpLSE, metadata_for_lse);
+               blk_qv, thr_id, dpLSE, metadata_for_lse, tA_unscaled_rowmax, tile_row_idx);
+      
     }
   }
 };

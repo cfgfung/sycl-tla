@@ -145,7 +145,10 @@ public:
              QVCoord          blk_qv,   // WG tile indices: (q,v)
              int              thr_id,   // Work-item ID
              float*           pLSE,     // Global LSE Ptr
-             const std::tuple<int, int, int, int, int>& metadata_for_lse) {   // Metadata for LSE to calculate offset
+             const std::tuple<int, int, int, int, int>& metadata_for_lse, // Metadata for LSE to calculate offset
+             FragARow       & tA_unscaled_rowmax,
+             int              row_tile_idx
+             ) {
 
     using namespace cute;
     using ElementA = typename FragA::element_type;
@@ -163,7 +166,7 @@ public:
     /* Complete softmax, dividing out sums. */
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < rA_sum.size(); i++)
-      rA_sum(i) = ElementA(1) / rA_sum(i);  // The recipocal 
+      rA_sum(i) = ElementA(1) / rA_sum(i);  // The recipocal
 
       //rA_sum(i) == cur_scale
 
@@ -186,23 +189,100 @@ public:
     reorder(rA, tOrO);
     copy(copy_o, tOrO, tOgO);
 
+    // Find the global row index
+    auto tOcO = thr_copy_o.partition_D(gO);
+
+    // Write to pLSE
+    // if (row_tile_idx != -1 && lane_id == row_tile_idx % intel::sg_size){
+    if (row_tile_idx != -1){
+      *(pLSE + row_tile_idx) = tA_unscaled_rowmax[0];
+    }
+    
+    
+    if (thr_id == 1){
+      // for (int i = 0; i < size(tOcO); ++i) {
+      //     // Get the coordinate tuple (m, n) for the i-th element
+      //     auto coord = tOcO(i); 
+          
+      //     // coord is a tuple, usually ((m, l), n) or similar depending on hierarchy
+      //     // simpler retrieval involves accessing raw indices if needed:
+      //     auto global_row = get<0>(coord); 
+      //     auto global_col = get<1>(coord);
+
+      //     print("global_row: ");
+      //     print(global_row);
+      //     print("   global_col: ");
+      //     print(global_col);
+      //     print('\n');
+      //     print("   ta_Max size: ");
+      //     print(tA_max.size());
+      //     print("   thr_id: ");
+      //     print(thr_id);
+      //     print('\n');
+      // }
+
+      // print("size(tOcO): " );
+      // print(size(tOcO));
+      // print('\n');
+      // print("rA.size(): ");
+      // print(rA.size());
+      // print('\n');
+
+      // print("tA_unscaled_rowmax: ");
+      // print_tensor(tA_unscaled_rowmax);
+      // print('\n');
+
+      // print("tA_sum.size() : ");
+      // print(tA_sum.size());
+      // print('\n');    
+
+      // print("tA_max.size(): ");
+      // print(tA_max.size());
+      // print('\n');
+      
+      // print("rA.size(): ");
+      // print(rA.size());
+      // print('\n');
+      // print("ReduceK{}: ");
+      // print(ReduceK{});
+      // print('\n');
+    }
+
     /* Calculate the LSE*/
+   //LSE =  max * softmax_scale + logf(cur_sum); // Need to find the row max, row sum 
+    
     auto [blk_q, num_heads_q, seq_len_qo, batch_idx, q_head_idx] = metadata_for_lse;
-    int blk_q_coord = get<0>(blk_qv);
+    // int blk_q_coord = get<0>(blk_qv);
+    // auto coord = tOcO(0); // Get the first coordinate set
+    // auto global_row = get<0>(coord); 
+    // auto global_col = get<1>(coord);
+
+    // if (global_col == 0){
+    //   //*(pLSE +global_row) = logf(tA_sum(0));
+    //   *(pLSE +global_row) = tA_bmax(0);
+    // }
+    
+    // print(thr_id);
+    // print('\n');
+    // if (thr_id % 128 == 0){
+    //   *(pLSE + thr_id/128) = thr_id;
+    // }
+
+    
     // auto sg = compat::get_nd_item<1>().get_sub_group();
     // int lane_id = static_cast<int>(sg.get_local_linear_id());
     // int sub_group_id = sg.get_group_id()[0];
-    int subgroup_size = sg.get_max_local_range()[0]; //16
+    // int subgroup_size = sg.get_max_local_range()[0]; //16
 
     // const int BLK_M = size(select<0>(TileShapeOutput{}));
     // auto blk_m_coord = get<0>(tile_coord); // seq_len_blk_idx
-    size_t lse_offset =
-        batch_idx * num_heads_q * seq_len_qo + // shift the batch -- batch_idx *
-                                             // num_heads_q * seq_len_qo
-        q_head_idx * seq_len_qo + // shift the head  -- head_q * seq_len_qo
-        blk_q_coord * blk_q;            // shift to the particular tile
-    int localtile_seq_coord = 0;
-    localtile_seq_coord = sub_group_id * subgroup_size + lane_id; // one subgroup will handle 16 sequence
+    // size_t lse_offset =
+    //     batch_idx * num_heads_q * seq_len_qo + // shift the batch -- batch_idx *
+    //                                          // num_heads_q * seq_len_qo
+    //     q_head_idx * seq_len_qo + // shift the head  -- head_q * seq_len_qo
+    //     blk_q_coord * blk_q;            // shift to the particular tile
+    // int localtile_seq_coord = 0;
+    // localtile_seq_coord = sub_group_id * subgroup_size + lane_id; // one subgroup will handle 16 sequence
 
     // if (sub_group_id == 0){
     //   // print("sub_group_id: "); print(sub_group_id); print('\n');   
@@ -274,13 +354,13 @@ public:
       return std::make_tuple(tArA, tA_sum, true);
     } else {
       /* Identify A tile ID and k block for this subgroup. */
-      auto thr_vak = group<1,3>(TiledMMAPV{}.get_thr_layout_vmnk()).get_flat_coord(assert_uniform(thr_id));
-      auto a_tile = get<1>(thr_vak);
-      auto k_blk = get<2>(thr_vak);
-
+      auto thr_vak = group<1,3>(TiledMMAPV{}.get_thr_layout_vmnk()).get_flat_coord(assert_uniform(thr_id)); //compress VMNK to V(MN)K. Use the threadID to get the value.
+      auto a_tile = get<1>(thr_vak); // m,n
+      auto k_blk = get<2>(thr_vak);  // k
+      
       /* Set up SLM tensors and partition A tiles among participating subgroups */
-      auto shape_A     = append(append(SGTileShapeA{}, ReduceK{}), SGPerWG{}/ReduceK{});
-      auto shape_A_row = make_shape(get<0>(SGTileShapeO{}), shape(ReduceSGLayout{}), ReduceK{}, SGPerWG{}/ReduceK{});
+      auto shape_A     = append(append(SGTileShapeA{}, ReduceK{}), SGPerWG{}/ReduceK{}); // M, K, L/stage for pipelining --
+      auto shape_A_row = make_shape(get<0>(SGTileShapeO{}), shape(ReduceSGLayout{}), ReduceK{}, SGPerWG{}/ReduceK{}); // M, N, K, L
 
       /* Physical layouts, with subtile modes broken out */
       auto sA_layout = group<2,4>(flat_divide(make_ordered_layout(shape_A, Step<_1,_0,_2,_3>{}), SGTileShapeO{}));
@@ -322,7 +402,7 @@ public:
 
         rA_max = rA_kmax[0];
         for (int kr = 1; kr < ReduceK{}; kr++)
-          cute::transform(rA_max, rA_kmax[kr], rA_max, cute::max_fn{});
+          cute::transform(rA_max, rA_kmax[kr], rA_max, cute::max_fn{}); // Finding the max from the K-block
 
         /* Calculate scale factors for aligning per-block maxima. */
         for (int kr = 0; kr < ReduceK{}; kr++) {
