@@ -303,10 +303,10 @@ public:
 
       // Epilogue
       CollectiveEpilogue epilogue{params.epilogue, shared_storage.epilogue};
-      auto metadata_for_lse = std::make_tuple(get<0>(TileShapePV{}), s.num_heads_q , seq_len_qo, idx_b, head_q);
+      auto metadata_for_lse = std::make_tuple(get<0>(TileShapePV{}), s.num_heads_q , seq_len_qo, idx_b, head_q, tile_row_idx, rows_of_maxima);
       epilogue(O(_,_,head_q,l_coord),
                tArA, tA_max, tA_sum,
-               blk_qv, thr_id, dpLSE, metadata_for_lse, tS_scaled_rowmax, tile_row_idx, rows_of_maxima);
+               blk_qv, thr_id, dpLSE, metadata_for_lse, tS_scaled_rowmax);
       
     }
   }
