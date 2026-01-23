@@ -448,40 +448,7 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
         }
       }
 
-      // Try to get the vertical offset for that thread within a tile
-          auto m_size = get<0>(tSrS.shape()); // Find out how many existing row maximum
-          rows_of_maxima = m_size;
-          // There is an implicit mapping that lane_id 0 will map to the first row maxima
-          auto sg = compat::get_nd_item<1>().get_sub_group();
-          int lane_id = static_cast<int>(sg.get_local_linear_id());
 
-          if (lane_id < m_size){
-            auto coord_tensor = make_identity_tensor(TileShapePV{});
-            auto thr_mma = thr_mma_pv.get_slice(thr_id);
-            auto tC_coords = thr_mma.partition_C(coord_tensor);
-            auto coord = tC_coords(lane_id); 
-            tile_row_idx = get<0>(coord);
-          }
-
-      // if (K== blk_k0 && cute::thread(0,0)){
-
-
-
-        // auto coord_tensor = make_identity_tensor(TileShapePV{});
-        // auto thr_mma = thr_mma_pv.get_slice(thr_id);
-        // auto tC_coords = thr_mma.partition_C(coord_tensor);
-        // for (int i = 0; i < size(tC_coords); ++i) {
-        //     // auto coord = tC_coords(i); // This is a tuple, e.g., (row, col)
-        //     // int row = get<0>(coord);   // Current Row relative to the Tile
-        //     // int col = get<1>(coord);   // Current Column relative to the Tile
-
-        //     // print("row: ");
-        //     // print(row);
-        //     // print(" col: ");
-        //     // print(col);
-        //     // print('\n');
-        // }   
-      // }
 
       /* Apply softmax and scaling */
       softmax(K == blk_k0, tSrS, tA_max, tA_sum, tArA, tA_unscaled_rowmax);
@@ -515,31 +482,30 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
           prefetch(prefetch_k, pKgK(_,_,_,K_next-kblocks_cache,D));
         }
       }
-    };
 
-    /* Main loop, blocked in k. */
-    if constexpr (CachedKV) {
-      for (int K = blk_k0; K < kblocks_cache; K++) {
-        mainloop_body(std::bool_constant<true>{}, K,
-                      copy_k_cache, copy_v_cache,
-                      prefetch_v_cache, tKgK_cache,
-                      tVgV_cache, pVgV_cache);
-      }
-    }
-
-    for (int K = (blk_k0 > kblocks_cache ? blk_k0 : kblocks_cache); K < blk_k1; K++) {
-      mainloop_body(std::bool_constant<false>{}, K,
-                    copy_k, copy_v,
-                    prefetch_v, tKgK,
-                    tVgV, pVgV);
+      /* Get necessary metadata for LSE*/
+      get_LSE_metadata(thr_id, get<0>(tSrS.shape()), TileShapePV{}, thr_mma_pv, rows_of_maxima, tile_row_idx);
     }
   }
 
-  // Calculate the local row index within a tile
-  // This local row index will be used for calculating the offset for LSE pointer
+  // Find the metadata for constructing the mapping between lane_id, local row index and row_maxima for this thread
+  // These data will be used to be used to calculate the LSE pointer offset.
+  template <class Shape, class ThrMMA>
   CUTLASS_DEVICE
-  void get_tile_row_idx() {
-    
+  void get_LSE_metadata(const int& thr_id, const int &blk_m_size, const Shape& tile_shape_PV, const ThrMMA& thr_mma_pv, int& rows_of_maxima, int& tile_row_idx) {
+    rows_of_maxima = blk_m_size; // The number of existing row maximum in a subgroup
+    // There is an implicit mapping that lane_id 0 will map to the first row maxima
+    auto sg = compat::get_nd_item<1>().get_sub_group();
+    int lane_id = static_cast<int>(sg.get_local_linear_id());
+
+    tile_row_idx = -1;
+    if (lane_id < blk_m_size){
+      auto coord_tensor = make_identity_tensor(tile_shape_PV);
+      auto thr_mma = thr_mma_pv.get_slice(thr_id);
+      auto tC_coords = thr_mma.partition_C(coord_tensor);
+      auto coord = tC_coords(lane_id); 
+      tile_row_idx = get<0>(coord);
+    }
   }
 
   // Single step of blocked softmax.

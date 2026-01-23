@@ -145,10 +145,8 @@ public:
              QVCoord          blk_qv,   // WG tile indices: (q,v)
              int              thr_id,   // Work-item ID
              float*           pLSE,     // Global LSE Ptr
-             const std::tuple<int, int, int, int, int>& metadata_for_lse, // Metadata for LSE to calculate offset
-             FragARow       & tS_scaled_rowmax,
-             int              tile_row_idx,
-             int              rows_of_maxima
+             const std::tuple<int, int, int, int, int, int, int>& metadata_for_lse, // Metadata for LSE to calculate offset
+             FragARow       & tS_scaled_rowmax            // the scaled row max value for this work-item
              ) {
 
     using namespace cute;
@@ -164,13 +162,13 @@ public:
     /* Complete softmax, dividing out sums. */
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < rA_sum.size(); i++)
-      rA_sum(i) = ElementA(1) / rA_sum(i);  // The recipocal
+      rA_sum(i) = ElementA(1) / rA_sum(i);
 
       //rA_sum(i) == cur_scale
 
     CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < rA.size(); i++) // rA.size is 64
-      rA(i) *= broadcast<0>(rA_sum, rA, i); // equivalent to *= curScale
+    for (int i = 0; i < rA.size(); i++)
+      rA(i) *= broadcast<0>(rA_sum, rA, i);
 
     /* Tile output */
     Tensor cO = make_identity_tensor(O.shape());          // (q,v)
@@ -188,7 +186,7 @@ public:
     copy(copy_o, tOrO, tOgO);
 
     /* Calculate the LSE*/
-    auto [blk_q, num_heads_q, seq_len_qo, batch_idx, q_head_idx] = metadata_for_lse;
+    auto [blk_q, num_heads_q, seq_len_qo, batch_idx, q_head_idx, tile_row_idx, rows_of_maxima] = metadata_for_lse;
     int blk_q_coord = get<0>(blk_qv);
     size_t lse_offset =
         batch_idx * num_heads_q * seq_len_qo + // shift the batch
@@ -203,23 +201,6 @@ public:
       tS_scaled_rowmax[0] = tS_scaled_rowmax[0]/kLog2e; 
       *(pLSE + lse_offset + tile_row_idx) = tS_scaled_rowmax[0] + logf(non_recipocal_rAsum);
     }
-    
-    
-    // int seq_coord = blk_q_coord * blk_q + localtile_seq_coord;
-    // // Check that if this is within the seq_len_qo
-    // if (seq_coord < seq_len_qo) {
-    //   // auto cur_sum = rowsum[lane_id];
-    //   // tLSE_reg =
-    //   //     cur_sum == 0.f ? -INFINITY : max * softmax_scale + logf(cur_sum);
-    //   // *(params.ptr_LSE + lse_offset + localtile_seq_coord) =
-    //   //     std::isnan(tLSE_reg) ? 0 : tLSE_reg;
-    //   // *(pLSE + lse_offset + localtile_seq_coord) = seq_coord;
-    // }
-
-    // *(pLSE + lse_offset + localtile_seq_coord) = seq_coord;
-
-    // size_t lse_offset = 0;
-    // *(pLSE + lse_offset) = 1;
 
   }
 
