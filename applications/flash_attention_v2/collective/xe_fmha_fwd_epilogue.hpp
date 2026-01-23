@@ -146,8 +146,9 @@ public:
              int              thr_id,   // Work-item ID
              float*           pLSE,     // Global LSE Ptr
              const std::tuple<int, int, int, int, int>& metadata_for_lse, // Metadata for LSE to calculate offset
-             FragARow       & tA_unscaled_rowmax,
-             int              row_tile_idx
+             FragARow       & tS_scaled_rowmax,
+             int              tile_row_idx,
+             int              rows_of_maxima
              ) {
 
     using namespace cute;
@@ -156,13 +157,10 @@ public:
     // Reduce k-blocks of A and A_sum across WG, if needed.
     auto [rA, rA_sum, active] = reduce_A(tArA, tA_max, tA_sum, thr_id);
 
-    auto sg = compat::get_nd_item<1>().get_sub_group();
-    int lane_id = static_cast<int>(sg.get_local_linear_id());
-    int sub_group_id = sg.get_group_id()[0];
-
     /* Some subgroups may not have any work to do; if so, quit early. */
     if (!active) return;
 
+    auto non_recipocal_rAsum = rA_sum(0);
     /* Complete softmax, dividing out sums. */
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < rA_sum.size(); i++)
@@ -189,135 +187,23 @@ public:
     reorder(rA, tOrO);
     copy(copy_o, tOrO, tOgO);
 
-    // Find the global row index
-    auto tOcO = thr_copy_o.partition_D(gO);
-
-    // Write to pLSE
-    // if (row_tile_idx != -1 && lane_id == row_tile_idx % intel::sg_size){
-    if (row_tile_idx != -1){
-      *(pLSE + row_tile_idx) = tA_unscaled_rowmax[0];
-    }
-    
-    
-    if (thr_id == 1){
-      // for (int i = 0; i < size(tOcO); ++i) {
-      //     // Get the coordinate tuple (m, n) for the i-th element
-      //     auto coord = tOcO(i); 
-          
-      //     // coord is a tuple, usually ((m, l), n) or similar depending on hierarchy
-      //     // simpler retrieval involves accessing raw indices if needed:
-      //     auto global_row = get<0>(coord); 
-      //     auto global_col = get<1>(coord);
-
-      //     print("global_row: ");
-      //     print(global_row);
-      //     print("   global_col: ");
-      //     print(global_col);
-      //     print('\n');
-      //     print("   ta_Max size: ");
-      //     print(tA_max.size());
-      //     print("   thr_id: ");
-      //     print(thr_id);
-      //     print('\n');
-      // }
-
-      // print("size(tOcO): " );
-      // print(size(tOcO));
-      // print('\n');
-      // print("rA.size(): ");
-      // print(rA.size());
-      // print('\n');
-
-      // print("tA_unscaled_rowmax: ");
-      // print_tensor(tA_unscaled_rowmax);
-      // print('\n');
-
-      // print("tA_sum.size() : ");
-      // print(tA_sum.size());
-      // print('\n');    
-
-      // print("tA_max.size(): ");
-      // print(tA_max.size());
-      // print('\n');
-      
-      // print("rA.size(): ");
-      // print(rA.size());
-      // print('\n');
-      // print("ReduceK{}: ");
-      // print(ReduceK{});
-      // print('\n');
-    }
-
     /* Calculate the LSE*/
-   //LSE =  max * softmax_scale + logf(cur_sum); // Need to find the row max, row sum 
-    
     auto [blk_q, num_heads_q, seq_len_qo, batch_idx, q_head_idx] = metadata_for_lse;
-    // int blk_q_coord = get<0>(blk_qv);
-    // auto coord = tOcO(0); // Get the first coordinate set
-    // auto global_row = get<0>(coord); 
-    // auto global_col = get<1>(coord);
+    int blk_q_coord = get<0>(blk_qv);
+    size_t lse_offset =
+        batch_idx * num_heads_q * seq_len_qo + // shift the batch
+        q_head_idx * seq_len_qo +              // shift the head
+        blk_q_coord * blk_q;                   // shift to the particular tile
+    size_t seq_coord = blk_q_coord * blk_q + tile_row_idx;
 
-    // if (global_col == 0){
-    //   //*(pLSE +global_row) = logf(tA_sum(0));
-    //   *(pLSE +global_row) = tA_bmax(0);
-    // }
+    if (tile_row_idx != -1 && seq_coord < seq_len_qo){
+      double kLog2e = 1.4426950408889634074;
+      // The softmax scale was multiplied by the kLog2e in the mainloop
+      // Need to divide it to restore the value
+      tS_scaled_rowmax[0] = tS_scaled_rowmax[0]/kLog2e; 
+      *(pLSE + lse_offset + tile_row_idx) = tS_scaled_rowmax[0] + logf(non_recipocal_rAsum);
+    }
     
-    // print(thr_id);
-    // print('\n');
-    // if (thr_id % 128 == 0){
-    //   *(pLSE + thr_id/128) = thr_id;
-    // }
-
-    
-    // auto sg = compat::get_nd_item<1>().get_sub_group();
-    // int lane_id = static_cast<int>(sg.get_local_linear_id());
-    // int sub_group_id = sg.get_group_id()[0];
-    // int subgroup_size = sg.get_max_local_range()[0]; //16
-
-    // const int BLK_M = size(select<0>(TileShapeOutput{}));
-    // auto blk_m_coord = get<0>(tile_coord); // seq_len_blk_idx
-    // size_t lse_offset =
-    //     batch_idx * num_heads_q * seq_len_qo + // shift the batch -- batch_idx *
-    //                                          // num_heads_q * seq_len_qo
-    //     q_head_idx * seq_len_qo + // shift the head  -- head_q * seq_len_qo
-    //     blk_q_coord * blk_q;            // shift to the particular tile
-    // int localtile_seq_coord = 0;
-    // localtile_seq_coord = sub_group_id * subgroup_size + lane_id; // one subgroup will handle 16 sequence
-
-    // if (sub_group_id == 0){
-    //   // print("sub_group_id: "); print(sub_group_id); print('\n');   
-    //   print("sub_group_id == 0"); print('\n');
-    // }
-
-  //   if (lane_id == 0 && sub_group_id == 0){
-  //     print("lse offset: ");
-  //     print(lse_offset);
-  //     print("\n");
-
-  //     print("seq_len_qo: ");
-  //     print(seq_len_qo);
-  //     print("\n");
-
-  //     print("blk_q: ");
-  //     print(blk_q);
-  //     print("\n");
-
-  //     print("q_head_idx: ");
-  //     print(q_head_idx);
-  //     print("\n");
-
-  //     print("batch_idx: ");
-  //     print(batch_idx);
-  //     print("\n");
-
-  //     print("blk_q_coord: ");
-  //     print(blk_q_coord);
-  //     print("\n");
-
-  //     print("localtile_seq_coord: ");
-  //     print(localtile_seq_coord);
-  //     print("\n");
-  // }
     
     // int seq_coord = blk_q_coord * blk_q + localtile_seq_coord;
     // // Check that if this is within the seq_len_qo

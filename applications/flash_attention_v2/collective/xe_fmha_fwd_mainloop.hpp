@@ -172,7 +172,7 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
   Params to_underlying_arguments(Arguments const &args, void * /* workspace */) {
     constexpr double kLog2e = 1.4426950408889634074;            // log_2(e)
     ElementS val = args.scale * static_cast<ElementS>(kLog2e);
-    return Params{val, args.ptr_page_table, args.page_size, args.num_pages_per_seq};
+    return Params{val, args.ptr_page_table, args.page_size, args.num_pages_per_seq}; // Somehow it is multiplied by val -- trick to avoid log 2?
   }
 
   CUTLASS_HOST_DEVICE static
@@ -215,6 +215,7 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
              int              discard_seq_coord,
              FragARow         & tA_unscaled_rowmax,
              int              & tile_row_idx,
+             int              & rows_of_maxima,
             TensorK_cache2D const& K_cache_2D = TensorK_cache2D{},
             TensorV_cache2D const& V_cache_2D = TensorV_cache2D{}
             ) {
@@ -443,6 +444,7 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
 
       // Try to get the vertical offset for that thread within a tile
           auto m_size = get<0>(tSrS.shape()); // Find out how many existing row maximum
+          rows_of_maxima = m_size;
           // There is an implicit mapping that lane_id 0 will map to the first row maxima
           auto sg = compat::get_nd_item<1>().get_sub_group();
           int lane_id = static_cast<int>(sg.get_local_linear_id());
@@ -510,23 +512,12 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
           FragSRow & tS_max,      // Softmax row-wise max accumulator
           FragSRow & tS_sum,      // Softmax row-wise sum accumulator
           FragA    & tA,          // O accumulator (for rescaling)
-          FragSRow & tS_unscaled_max      // the unscaled row max
+          FragSRow & tS_scaled_rowmax      // the scaled row max of S
           ) {        
 
     /* Compute row-wise maxima for this block */
     auto tS_bmax = reduce<1>(tS, sycl::maximum{});
 
-    // if (cute::thread(7,0)){
-    //   print("tS: \n" );
-    //   print_tensor(tS);
-    //   print(' ');
-    //   print("tS_max: \n" );
-    //   print_tensor(tS_max);
-    //   print(' ');
-    //   print("tS_bmax: \n" );
-    //   print_tensor(tS_bmax);
-    //   print(' ');
-    // }
     /* Update (scaled) maxima */
     auto tS_prev_max = tS_max;
     CUTLASS_PRAGMA_UNROLL
@@ -536,8 +527,8 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
 
     /* Find the unscaled row maxima*/
     CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < tS_unscaled_max.size(); i++) {
-      tS_unscaled_max(i) = sycl::max(tS_unscaled_max(i), tS_bmax(i));
+    for (int i = 0; i < tS_scaled_rowmax.size(); i++) {
+      tS_scaled_rowmax(i) = sycl::max(tS_scaled_rowmax(i), params.scale * tS_bmax(i));
     }
 
     /* Scale S and subtract maxima, then exponentiate */

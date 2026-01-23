@@ -127,6 +127,7 @@ struct Options {
     }
 
     softmax_scale = 1 / sqrt(static_cast<float>(head_size_qk));
+    // softmax_scale = 0.127517; // Debug
   }
 
   /// Prints the usage statement.
@@ -498,7 +499,7 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
           for (int col = 0; col < seq_len_kv; col++) {
             qkscore_scaled[col + row * seq_len_kv] =
                 host_S[col + row * seq_len_kv] *
-                softmax_scale; // (qkscore * scale) - max_row
+                softmax_scale; // (qkscore * scale)
           }
         }
 
@@ -533,9 +534,10 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
           host_LSE[row + offset_lse] =
               std::isnan(max_scaled_lse_vec[row] + logf(sum_exp))
                   ? 0
-                  // : host_LSE[row + offset_lse] =
-                  //       max_scaled_lse_vec[row] + logf(sum_exp);
-                  : host_LSE[row + offset_lse] = max_vec[row]; // For debuging the mapping of LSE in epilogue
+                  : host_LSE[row + offset_lse] =
+                        max_scaled_lse_vec[row] + logf(sum_exp);
+                  //  : host_LSE[row + offset_lse] = logf(sum_exp); // For debugging
+                  //: host_LSE[row + offset_lse] = max_vec[row]; //  For debuging the mapping of LSE in epilogue
                   //: host_LSE[row + offset_lse] = logf(sum_exp); // For debuging the mapping of LSE in epilogue
         }
 
@@ -625,29 +627,33 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
     }
 
     compat::wait();
-
+    compat::memcpy<float>(block_ref_LSE.get(), host_LSE.data(), host_LSE.size());
     // Check if output from CUTLASS kernel and reference kernel are equal or not
     bool passed = cutlass::reference::device::BlockCompareRelativelyEqual(block_ref_O.get(), block_O.get(),
                                                                           block_O.size(), ElementO{0.05}, ElementO{0.05});
+    bool passed_lse = cutlass::reference::device::BlockCompareRelativelyEqual(block_ref_LSE.get(), block_LSE.get(), block_LSE.size(), 0.01f, 0.01f);                                                           
 
-    print("\n ================================= \n");
-    print("\n host LSE \n");
-    for (int i = 0; i < host_LSE.size(); i++){
-      print(host_LSE[i]);
-      print('\n');
+    if (!passed_lse){
+      print("\n ================================= \n");
+      print("\n host LSE \n");
+      for (int i = 0; i < host_LSE.size(); i++){
+        print(host_LSE[i]);
+        print('\n');
+      }
+      
+      std::vector<float> device_LSE(block_LSE.size());
+      compat::wait();
+      compat::memcpy<float>(device_LSE.data(), block_LSE.get(),
+                                block_LSE.size());
+      print("\n Device LSE \n");
+      for (int i = 0; i < device_LSE.size(); i++){
+        print(device_LSE[i]);
+        print('\n');
+      }
     }
+
     
-    std::vector<float> device_LSE(block_LSE.size());
-    compat::wait();
-    compat::memcpy<float>(device_LSE.data(), block_LSE.get(),
-                              block_LSE.size());
-    print("\n Device LSE \n");
-    for (int i = 0; i < device_LSE.size(); i++){
-      print(device_LSE[i]);
-      print('\n');
-    }
-    
-    return passed;
+    return passed && passed_lse;
   }
 
   /// Initialize operands to be used in the GEMM and reference GEMM
