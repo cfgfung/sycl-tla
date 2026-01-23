@@ -279,8 +279,9 @@ public:
 
       // O accumulator types
       FragA tArA;
-      FragARow tA_max, tA_sum, tA_unscaled_rowmax;
+      FragARow tA_max, tA_sum, tS_scaled_rowmax;
       int tile_row_idx = -1;
+      int rows_of_maxima = 0;
 
       // Main loop
       int l_coord = is_var_len ? 0 : idx_b;
@@ -291,7 +292,7 @@ public:
                tArA, tA_max, tA_sum,
                blk_qv, 0, k_blocks, k_blocks,
                thr_id, seq_len, seq_len_kv_cache, idx_b,
-               full_tile_offset, discard_seq_coord, tA_unscaled_rowmax, tile_row_idx,
+               full_tile_offset, discard_seq_coord, tS_scaled_rowmax, tile_row_idx, rows_of_maxima,
                K_cache(_,_,head,l_coord),
                V_cache(_,_,head,l_coord)
                );
@@ -305,7 +306,7 @@ public:
       auto metadata_for_lse = std::make_tuple(get<0>(TileShapePV{}), s.num_heads_q , seq_len_qo, idx_b, head_q);
       epilogue(O(_,_,head_q,l_coord),
                tArA, tA_max, tA_sum,
-               blk_qv, thr_id, dpLSE, metadata_for_lse, tA_unscaled_rowmax, tile_row_idx);
+               blk_qv, thr_id, dpLSE, metadata_for_lse, tS_scaled_rowmax, tile_row_idx, rows_of_maxima);
       
     }
   }
