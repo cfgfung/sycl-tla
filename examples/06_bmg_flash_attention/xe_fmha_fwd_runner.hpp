@@ -346,6 +346,7 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
     auto block_V_cache_ = in_memory(block_V_cache);
 
     std::vector<float> host_LSE(block_ref_LSE.size());
+    std::vector<ElementO> host_O(block_ref_O.size());
 
     using ElementV_ = std::remove_pointer_t<decltype(block_V_.get())>;
     using ElementK_ = std::remove_pointer_t<decltype(block_K_.get())>;
@@ -472,10 +473,40 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
         auto full_tile_offset = seq_len_kv - offset;
         if (is_causal) {
           // apply mask to S
+          // for (int row = 0; row < seq_len_qo; row++) {
+          //   for (int col = seq_len_kv_cache; col < seq_len_kv_total; col++) {
+          //       if ((col - seq_len_kv_cache - full_tile_offset) > (row - discard_seq_coord))
+          //         host_S[col + row * seq_len_kv_total] = ElementS{-INFINITY};
+          //   }
+          // }
           for (int row = 0; row < seq_len_qo; row++) {
-            for (int col = seq_len_kv_cache; col < seq_len_kv_total; col++) {
-                if ((col - seq_len_kv_cache - full_tile_offset) > (row - discard_seq_coord))
-                  host_S[col + row * seq_len_kv_total] = ElementS{-INFINITY};
+            for (int col = 0; col < seq_len_kv; col++) {
+              if (seq_len_kv > seq_len_qo) {
+                int first_masked_col_index =
+                    seq_len_kv - (seq_len_qo - 1) +
+                    row; // Find where does the masking occur for that
+                          // sequence
+                if (col >= first_masked_col_index) {
+                  host_S[col + row * seq_len_kv] =
+                      ElementAccumulator{-INFINITY};
+                }
+              } else {
+                if (seq_len_qo > seq_len_kv) {
+                  int first_non_masked_sequence = seq_len_qo - seq_len_kv;
+                  if (row < first_non_masked_sequence ||
+                      col > row - first_non_masked_sequence) {
+                    host_S[col + row * seq_len_kv] =
+                        ElementAccumulator{-INFINITY};
+                  }
+                }
+                // seq_len_qo == seq_len_kv
+                else {
+                  if (col > row) {
+                    host_S[col + row * seq_len_kv] =
+                        ElementAccumulator{-INFINITY};
+                  }
+                }
+              }
             }
           }
         }
@@ -537,7 +568,7 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
                   : host_LSE[row + offset_lse] =
                         max_scaled_lse_vec[row] + logf(sum_exp);
                   //  : host_LSE[row + offset_lse] = logf(sum_exp); // For debugging
-                  //: host_LSE[row + offset_lse] = max_vec[row]; //  For debuging the mapping of LSE in epilogue
+                  // host_LSE[row + offset_lse] = max_vec[row]; //  For debuging the mapping of LSE in epilogue
                   //: host_LSE[row + offset_lse] = logf(sum_exp); // For debuging the mapping of LSE in epilogue
         }
 
@@ -564,9 +595,39 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
           idx = row * seq_len_kv_total;
           sum_idx = row;
           for (int col = 0; col < seq_len_kv_total; col++, idx++) {
-            if(is_causal && row < discard_seq_coord) {
-              host_S[idx] = 0;
-            } else {
+            if (is_causal) {
+              if (seq_len_kv_total > seq_len_qo) {
+                int first_masked_col_index =
+                    seq_len_kv_total - (seq_len_qo - 1) +
+                    row; // Find where does the masking occur for that
+                          // sequence
+                if (col >= first_masked_col_index) {
+                  host_S[idx] = 0;
+                } else {
+                  host_S[idx] /= sum_vec[sum_idx];
+                }
+              } else {
+                if (seq_len_qo > seq_len_kv_total) {
+                  int first_non_masked_sequence = seq_len_qo - seq_len_kv_total;
+                  if (row < first_non_masked_sequence ||
+                      col > row - first_non_masked_sequence) {
+                    host_S[idx] = 0;
+                  } else {
+                    host_S[idx] /= sum_vec[sum_idx];
+                  }
+                }
+                // seq_len_qo == seq_len_kv
+                else {
+                  if (col > row) {
+                    host_S[idx] = 0;
+                  } else {
+                    host_S[idx] /= sum_vec[sum_idx];
+                  }
+                }
+              }
+            }
+            // non-causal
+            else {
               host_S[idx] /= sum_vec[sum_idx];
             }
           }
@@ -632,6 +693,34 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
     bool passed = cutlass::reference::device::BlockCompareRelativelyEqual(block_ref_O.get(), block_O.get(),
                                                                           block_O.size(), ElementO{0.05}, ElementO{0.05});
     bool passed_lse = cutlass::reference::device::BlockCompareRelativelyEqual(block_ref_LSE.get(), block_LSE.get(), block_LSE.size(), 0.01f, 0.01f);                                                           
+
+    if (!passed){
+      print("\n ================================= \n");
+      std::vector<float> device_O(block_ref_O.size());
+      std::vector<float> host_O(block_ref_O.size());
+      compat::wait();
+      compat::memcpy<float>(device_O.data(), block_O.get(),
+                                block_O.size());
+      compat::memcpy<float>(host_O.data(), block_ref_O.get(),
+                                block_ref_O.size());                  
+      print("\n host_O \n");
+      for (int i = 0; i < block_ref_O.size(); i++){
+        if (i != 0 && i % 64 == 0){
+          print('\n');
+        }
+        print(host_O[i]);
+        print(' ');
+
+      }
+      print("\n Device O \n");
+      for (int i = 0; i < device_O.size(); i++){
+        if (i != 0 && i % 64 == 0){
+          print('\n');
+        }
+        print(device_O[i]);
+        print(' ');
+      }
+    }
 
     if (!passed_lse){
       print("\n ================================= \n");

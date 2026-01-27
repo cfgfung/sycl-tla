@@ -187,6 +187,37 @@ public:
     }
   }
 
+  // Find the length of the longest non masked sequence within that subgroup
+  CUTLASS_DEVICE
+  int calculate_longest_non_masked_length(
+      const int &seq_len_kv, const int &seq_len_qo, const int &last_seq_coord,
+      const int &first_non_masked_sequence) {
+    int longest_non_masked_length = 0;
+
+    if (seq_len_kv > seq_len_qo) {
+      // Find out how many elements have to be calculated in the first sequence
+      int elements_in_first_line = seq_len_kv - (seq_len_qo - 1);
+      longest_non_masked_length =
+          elements_in_first_line +
+          last_seq_coord; // the number of elements increased with the sequence
+                          // row number.
+    }
+    if (seq_len_qo > seq_len_kv) {
+      longest_non_masked_length = cute::min(
+          seq_len_kv,
+          cute::max(0, last_seq_coord - first_non_masked_sequence + 1));
+    }
+    if (seq_len_qo == seq_len_kv) {
+      longest_non_masked_length = cute::min(
+          seq_len_kv,
+          cute::max(0, last_seq_coord - first_non_masked_sequence + 1));
+    }
+
+    longest_non_masked_length =
+        cute::min(seq_len_kv, longest_non_masked_length);
+    return longest_non_masked_length;
+  }
+
   CUTLASS_DEVICE
   void operator()(Params const &params, char *smem_buf)
   {
@@ -223,9 +254,23 @@ public:
       auto discard_seq_coord = seq_len_qo - offset;
       auto full_tile_offset = seq_len_kv - offset;
       int seq_coord = cute::min(seq_len_qo, (blk_q * get<0>(TileShapeQK{}) + q_offset_sg));
+      int first_non_masked_sequence = seq_len_qo - seq_len_kv;
+      int last_seq_coord = seq_coord + q_sg_tile - 1;
 
-      if (CollectiveMainloop::CausalMask && seq_coord < discard_seq_coord) continue;
-      const int seq_len_new = CollectiveMainloop::CausalMask ? full_tile_offset + cute::min(seq_len_kv, seq_coord - discard_seq_coord) + q_sg_tile : seq_len_kv;
+      // Optimization - Skip computations as this current block will not affect
+      // the output
+      if (blk_q * get<0>(TileShapePV{}) >= seq_len_qo) {
+        continue;
+      }
+      if (CollectiveMainloop::CausalMask && last_seq_coord < first_non_masked_sequence) {
+        continue;
+      }
+
+      ///if (CollectiveMainloop::CausalMask && seq_coord < discard_seq_coord) continue;
+      //const int seq_len_new = CollectiveMainloop::CausalMask ? full_tile_offset + cute::min(seq_len_kv, seq_coord - discard_seq_coord) + q_sg_tile : seq_len_kv;
+      
+      
+      const int seq_len_new = CollectiveMainloop::CausalMask ? calculate_longest_non_masked_length(seq_len_kv, seq_len_qo, last_seq_coord, first_non_masked_sequence) : seq_len_kv;
       const int seq_len = seq_len_new + seq_len_kv_cache;
       const int k_blocks = cute::ceil_div(seq_len, get<1>(TileShapeQK{}));
 
@@ -291,7 +336,7 @@ public:
                V(_,_,head,l_coord),
                tArA, tA_max, tA_sum,
                blk_qv, 0, k_blocks, k_blocks,
-               thr_id, seq_len, seq_len_kv_cache, idx_b,
+               thr_id, seq_len, seq_len_qo, seq_len_kv_cache, idx_b,
                full_tile_offset, discard_seq_coord, tS_scaled_rowmax, tile_row_idx, rows_of_maxima,
                K_cache(_,_,head,l_coord),
                V_cache(_,_,head,l_coord)
@@ -630,7 +675,13 @@ public:
               V(_,_,head_kv,idx_b),
               tArA, tA_max, tA_sum,
               blk_qv, start_blk, end_blk, local_k_blocks,
-              thr_id, s.seq_len_kv, 0, 0, 0, 0);
+              thr_id, s.seq_len_kv, s.seq_len_qo, 0, 0, 0, 0);
+        
+        if (thread(0,0)){
+          print("s.seq_len_qo: ");
+          print(s.seq_len_qo);
+          print('\n');
+        }
 
         // partition id of start batch head id in current wg
         int partition_id = get_partition_id(wg_id, batch_head_id, num_blocks_per_wg, local_k_blocks);

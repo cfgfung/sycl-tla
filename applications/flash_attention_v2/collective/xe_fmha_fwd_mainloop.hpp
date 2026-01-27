@@ -209,6 +209,7 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
              int              total_blk, // Total # of K blocks
              int              thr_id,
              int              seq_len,
+             int              seq_len_qo,
              int              seq_len_kv_cache,
              int              l_coord,
              int              full_tile_offset,
@@ -341,59 +342,6 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
     bool check_remainder_k = (seq_len % get<1>(TileShapeQK{}) != 0);
 
     /* Main loop, blocked in k. */
-    if constexpr (CachedKV) {
-      for (int K = blk_k0; K < kblocks_cache; K++) {
-        int physical_K_tile = K;
-        if constexpr (PagedKV) {
-          physical_K_tile = get_physical_k_tile(K, l_coord, seq_len_kv_cache);
-        }
-
-        /* GEMM 1: S = K * Q */
-        clear(tSrS);
-        CUTLASS_PRAGMA_UNROLL
-        for (int D = 0; D < size<4>(tKgK); D++) {
-          copy(copy_q, tQgQ(_,_,_,D),   tQrQ);
-          copy(copy_k_cache, tKgK_cache(_,_,_,physical_K_tile,D), tKrK);
-          reorder(tQrQ, tSrQ);
-          reorder(tKrK, tSrK);
-          cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
-        }
-
-        /* V prefetch for GEMM 2 */
-        prefetch(prefetch_v_cache, pVgV_cache(_,_,_,physical_K_tile));
-
-        /* Apply softmax and scaling */
-        softmax(K == blk_k0, tSrS, tA_max, tA_sum, tArA, tA_unscaled_rowmax);
-        reorder(tSrS, tArP);
-
-        /* GEMM 2: A += P * V, split in v dimension */
-        CUTLASS_PRAGMA_UNROLL
-        for (int VV = 0; VV < VTiles; VV++) {
-          copy(copy_v_cache, tVgV_cache(_,_,_,VV,physical_K_tile), tVrV);
-          reorder(tVrV, tArV);
-          cute::gemm(mma_pv, tArP, tArV, tArA(_,_,_,VV));
-        }
-
-        /* K prefetch */
-        for (int D = 0; D < size<4>(pKgK); D++) {
-          int K_next = K + Stages;
-          bool is_cache_next = K_next < kblocks_cache;
-          int physical_K_next = K_next;
-          if constexpr (PagedKV) {
-            if (is_cache_next) {
-              physical_K_next = get_physical_k_tile(K_next, l_coord, seq_len_kv_cache);
-            }
-          }
-
-          if (is_cache_next) {
-            prefetch(prefetch_k_cache, pKgK_cache(_,_,_,physical_K_next,D));
-          } else {
-            prefetch(prefetch_k, pKgK(_,_,_,K_next-kblocks_cache,D));
-          }
-        }
-      }
-    }
-
     for (int K = (blk_k0 > kblocks_cache ? blk_k0 : kblocks_cache); K < blk_k1; K++) {
       /* GEMM 1: S = K * Q */
       clear(tSrS);
@@ -425,6 +373,37 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
               tSrS(i) = ElementS(-INFINITY);
             }
           }
+          // int first_masked_col_index = 0;
+          // int first_non_masked_sequence = 0;
+          // int seq_len_kv = seq_len;
+
+          // CUTLASS_PRAGMA_UNROLL
+          // for (int i = 0; i < tSrS.size(); ++i) {
+          //   int row_idx = get<0>(cS_thread(i)); // From register to get back global coordinates
+          //   int col_idx = get<1>(cS_thread(i));
+
+          //   if (seq_len_kv > seq_len_qo) {
+          //     first_masked_col_index = seq_len_kv - (seq_len_qo - 1) + row_idx;
+          //       if (col_idx >= first_masked_col_index) {
+          //         tSrS(i) = ElementS(-INFINITY);
+          //       }
+          //   }
+            
+          //   if (seq_len_qo > seq_len_kv) {
+          //     first_non_masked_sequence = seq_len_qo - seq_len_kv;
+          //     if (row_idx < first_non_masked_sequence ||
+          //         col_idx > row_idx - first_non_masked_sequence) {
+          //       tSrS(i) = ElementS(-INFINITY);
+          //     }            
+          //   }
+
+          //   if (seq_len_qo == seq_len_kv) {
+          //     if (col_idx > row_idx) {
+          //       tSrS(i) = ElementS(-INFINITY);
+          //     }
+          //   }
+          // }
+
         }
       }
       /* k masking for remainder tiles */ // When it is not fully divisible by QK.
@@ -463,7 +442,7 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
       }
 
       /* Get necessary metadata for LSE*/
-      get_LSE_metadata(thr_id, get<0>(tSrS.shape()), TileShapePV{}, thr_mma_pv, rows_of_maxima, tile_row_idx);
+      get_LSE_metadata(thr_id, TileShapePV{}, thr_mma_pv, rows_of_maxima, tile_row_idx);
     }
   }
 
@@ -471,17 +450,28 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
   // These data will be used to be used to calculate the LSE pointer offset.
   template <class Shape, class ThrMMA>
   CUTLASS_DEVICE
-  void get_LSE_metadata(const int& thr_id, const int &blk_m_size, const Shape& tile_shape_PV, const ThrMMA& thr_mma_pv, int& rows_of_maxima, int& tile_row_idx) {
-    rows_of_maxima = blk_m_size; // The number of existing row maximum in a subgroup
+  void get_LSE_metadata(const int& thr_id, const Shape& tile_shape_PV, const ThrMMA& thr_mma_pv, int& rows_of_maxima, int& tile_row_idx) {
+    
     // There is an implicit mapping that lane_id 0 will map to the first row maxima
     auto sg = compat::get_nd_item<1>().get_sub_group();
     int lane_id = static_cast<int>(sg.get_local_linear_id());
 
+    // Find the number of rows handled by 1 subgroup
+    auto coord_tensor = make_identity_tensor(tile_shape_PV);
+    auto thr_mma = thr_mma_pv.get_slice(thr_id);
+    auto tC_coords = thr_mma.partition_C(coord_tensor);
+    int max_row_idx = -1;
+    int min_row_idx = INT_MAX;
+    for (int i = 0; i < tC_coords.size(); i++){
+      int row_idx = get<0>(tC_coords[i]);
+      max_row_idx = max(max_row_idx, row_idx);
+      min_row_idx = min(min_row_idx, row_idx);
+    }
+
+    rows_of_maxima = max_row_idx - min_row_idx + 1; // The number of existing row maximum in a subgroup
+
     tile_row_idx = -1;
-    if (lane_id < blk_m_size){
-      auto coord_tensor = make_identity_tensor(tile_shape_PV);
-      auto thr_mma = thr_mma_pv.get_slice(thr_id);
-      auto tC_coords = thr_mma.partition_C(coord_tensor);
+    if (lane_id < rows_of_maxima){
       auto coord = tC_coords(lane_id); 
       tile_row_idx = get<0>(coord);
     }
