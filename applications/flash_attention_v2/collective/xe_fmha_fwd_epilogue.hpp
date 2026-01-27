@@ -146,7 +146,7 @@ public:
              int              thr_id,   // Work-item ID
              float*           pLSE,     // Global LSE Ptr
              const std::tuple<int, int, int, int, int, int, int>& metadata_for_lse, // Metadata for LSE to calculate offset
-             FragARow       & tS_scaled_rowmax            // the scaled row max value for this work-item
+             FragARow       & tS_scaled_rowmax            // the scaled row max value for this work-item 
              ) {
 
     using namespace cute;
@@ -194,12 +194,18 @@ public:
         blk_q_coord * blk_q;                   // shift to the particular tile
     size_t seq_coord = blk_q_coord * blk_q + tile_row_idx;
 
-    if (tile_row_idx != -1 && seq_coord < seq_len_qo){
+    // There is an implicit mapping that lane_id 0 will map to the first row maxima
+    auto sg = compat::get_nd_item<1>().get_sub_group();
+    int lane_id = static_cast<int>(sg.get_local_linear_id());
+
+    if (tile_row_idx != -1 && seq_coord < seq_len_qo 
+        && (tile_row_idx % rows_of_maxima) == lane_id){ // only 1 lane contain the correct row maxima for that particular row
       double kLog2e = 1.4426950408889634074;
       // The softmax scale was multiplied by the kLog2e in the mainloop
       // Need to divide it to restore the value
-      tS_scaled_rowmax[0] = tS_scaled_rowmax[0]/kLog2e; 
-      *(pLSE + lse_offset + tile_row_idx) = tS_scaled_rowmax[0] + logf(non_recipocal_rAsum);
+      tS_scaled_rowmax[0] = tS_scaled_rowmax[0]/kLog2e;
+      float lse_val = tS_scaled_rowmax[0] + logf(non_recipocal_rAsum);
+      *(pLSE + lse_offset + tile_row_idx) = lse_val == -INFINITY ? 0 : lse_val;
     }
 
   }
