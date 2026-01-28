@@ -253,16 +253,17 @@ public:
       auto offset = cute::min(seq_len_qo, seq_len_kv);
       auto discard_seq_coord = seq_len_qo - offset;
       auto full_tile_offset = seq_len_kv - offset;
-      int seq_coord = cute::min(seq_len_qo, (blk_q * get<0>(TileShapeQK{}) + q_offset_sg));
+      int seq_coord = cute::min(seq_len_qo, (blk_q * get<0>(TileShapeQK{}) + q_offset_sg)); // --- already counted the previous subgroup
       int first_non_masked_sequence = seq_len_qo - seq_len_kv;
       int last_seq_coord = seq_coord + q_sg_tile - 1;
+      // int tile_last_seq_coord = seq_coord + get<0>(TileShapeQK{}) - 1;
 
       // Optimization - Skip computations as this current block will not affect
       // the output
       if (blk_q * get<0>(TileShapePV{}) >= seq_len_qo) {
         continue;
       }
-      if (CollectiveMainloop::CausalMask && last_seq_coord < first_non_masked_sequence) {
+      if (CollectiveMainloop::CausalMask && first_non_masked_sequence > last_seq_coord){ //last_seq_coord) {
         continue;
       }
 
@@ -270,7 +271,8 @@ public:
       //const int seq_len_new = CollectiveMainloop::CausalMask ? full_tile_offset + cute::min(seq_len_kv, seq_coord - discard_seq_coord) + q_sg_tile : seq_len_kv;
       
       
-      const int seq_len_new = CollectiveMainloop::CausalMask ? calculate_longest_non_masked_length(seq_len_kv, seq_len_qo, last_seq_coord, first_non_masked_sequence) : seq_len_kv;
+      //const int seq_len_new = CollectiveMainloop::CausalMask ? calculate_longest_non_masked_length(seq_len_kv, seq_len_qo, last_seq_coord, first_non_masked_sequence) : seq_len_kv;
+      const int seq_len_new = seq_len_kv;
       const int seq_len = seq_len_new + seq_len_kv_cache;
       const int k_blocks = cute::ceil_div(seq_len, get<1>(TileShapeQK{}));
 
@@ -336,7 +338,7 @@ public:
                V(_,_,head,l_coord),
                tArA, tA_max, tA_sum,
                blk_qv, 0, k_blocks, k_blocks,
-               thr_id, seq_len, seq_len_qo, seq_len_kv_cache, idx_b,
+               thr_id, seq_len, seq_len_qo, seq_len_kv, seq_len_kv_cache, idx_b,
                full_tile_offset, discard_seq_coord, tS_scaled_rowmax, tile_row_idx, rows_of_maxima,
                K_cache(_,_,head,l_coord),
                V_cache(_,_,head,l_coord)
@@ -675,7 +677,7 @@ public:
               V(_,_,head_kv,idx_b),
               tArA, tA_max, tA_sum,
               blk_qv, start_blk, end_blk, local_k_blocks,
-              thr_id, s.seq_len_kv, s.seq_len_qo, 0, 0, 0, 0);
+              thr_id, s.seq_len_kv, s.seq_len_qo, s.seq_len_kv, 0, 0, 0, 0);
         
         if (thread(0,0)){
           print("s.seq_len_qo: ");

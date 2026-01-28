@@ -167,8 +167,12 @@ public:
       //rA_sum(i) == cur_scale
 
     CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < rA.size(); i++)
+    for (int i = 0; i < rA.size(); i++){
       rA(i) *= broadcast<0>(rA_sum, rA, i);
+      if (std::isnan(rA(i))){
+        rA(i) = 0; // Handle the -nan when the whole sequence is completely masked
+      }
+    }
 
     /* Tile output */
     Tensor cO = make_identity_tensor(O.shape());          // (q,v)
