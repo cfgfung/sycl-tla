@@ -359,18 +359,16 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
       /* V prefetch for GEMM 2 */
       prefetch(prefetch_v, pVgV(_,_,_,K-kblocks_cache));
 
-      /* Handle corner cases */
-      Tensor cPgP = make_identity_tensor(make_shape(seq_len_qo, seq_len_kv)); // Need to double check
+      /* Masking for remainder tiles */
+      Tensor cPgP = make_identity_tensor(make_shape(seq_len_qo, seq_len_kv));
       Tensor gP = local_tile(cPgP, take<0,2>(TileShapeQK{}), make_coord(get<0>(blk_qv), K));
       auto cS_thread = thr_mma_qk.partition_C(gP);
 
       int rows_per_sg = get<0>(shape_div(TileShapeQK{}, shape(SubgroupLayoutQK{})));
       CUTLASS_PRAGMA_UNROLL
       for (int i = 0; i < tSrS.size(); ++i) {
-        int row_idx = get<0>(cS_thread(i)); // get the global coordinate of the tile
+        int row_idx = get<0>(cS_thread(i));
         int col_idx = get<1>(cS_thread(i));
-
-        // Solve remainder
         if (col_idx >= seq_len_kv) {
           tSrS(i) = ElementS(-INFINITY);
         }
@@ -378,58 +376,34 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
 
       /* Causal masking */
       if constexpr (CausalMask) {
-          CUTLASS_PRAGMA_UNROLL
-          for (int i = 0; i < tSrS.size(); ++i) {
-            int row_idx = get<0>(cS_thread(i));
-            int col_idx = get<1>(cS_thread(i));
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < tSrS.size(); ++i) {
+          int row_idx = get<0>(cS_thread(i));
+          int col_idx = get<1>(cS_thread(i));
 
-            if (seq_len_qo == seq_len_kv){
-              if (col_idx > row_idx) {
-                tSrS(i) = ElementS(-INFINITY);
-              }
-            }
-
-            if (seq_len_kv > seq_len_qo){
-              int first_masked_col_index = 0;
-              first_masked_col_index = seq_len_kv - (seq_len_qo - 1) + row_idx;
-              if (col_idx >= first_masked_col_index) {
-                    tSrS(i) = ElementS{-INFINITY};
-              }
-            }
-
-            if (seq_len_qo > seq_len_kv) {
-              int first_non_masked_sequence = seq_len_qo - seq_len_kv;
-              if (row_idx < first_non_masked_sequence ||
-                  col_idx > row_idx - first_non_masked_sequence) {
-                tSrS(i) = ElementS{-INFINITY};
-              }
+          if (seq_len_qo == seq_len_kv){
+            if (col_idx > row_idx) {
+              tSrS(i) = ElementS(-INFINITY);
             }
           }
+
+          if (seq_len_kv > seq_len_qo){
+            int first_masked_col_index = 0;
+            first_masked_col_index = seq_len_kv - (seq_len_qo - 1) + row_idx;
+            if (col_idx >= first_masked_col_index) {
+                  tSrS(i) = ElementS{-INFINITY};
+            }
+          }
+
+          if (seq_len_qo > seq_len_kv) {
+            int first_non_masked_sequence = seq_len_qo - seq_len_kv;
+            if (row_idx < first_non_masked_sequence ||
+                col_idx > row_idx - first_non_masked_sequence) {
+              tSrS(i) = ElementS{-INFINITY};
+            }
+          }
+        }
       }
-
-
-        // if (cute::thread(0,0)){
-        //   for (int i = 0; i < tSrS.size(); ++i) {
-        //     int row_idx = get<0>(cS_thread(i)); // Is this global coordinate?
-        //     int col_idx = get<1>(cS_thread(i)); //
-        //     print("col idx: ");
-        //     print(col_idx); 
-        //     print(" seq_len_qo: ");
-        //     print(seq_len_qo);
-        //     print(" seq_len_kv: ");
-        //     print(seq_len_kv);
-        //     print('\n');
-        //   }
-        // }
-
-    
-
-
-      
-
-
-
-
 
       /* Apply softmax and scaling */
       softmax(K == blk_k0, tSrS, tA_max, tA_sum, tArA, tA_unscaled_rowmax);
