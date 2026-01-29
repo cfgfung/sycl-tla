@@ -310,15 +310,25 @@ public:
       auto stride_k = is_var_len ? cutlass::make_cute_packed_stride(StrideK{}, shape_K) : p.dK;
       auto stride_v = is_var_len ? cutlass::make_cute_packed_stride(StrideV{}, shape_V) : p.dV;
       auto stride_o = is_var_len ? cutlass::make_cute_packed_stride(StrideO{}, shape_O) : p.dO;
+      
       auto stride_k_cache = is_var_len ? cutlass::make_cute_packed_stride(StrideK{}, shape_K_cache) : p.dK_cache;
       auto stride_v_cache = is_var_len ? cutlass::make_cute_packed_stride(StrideV{}, shape_V_cache) : p.dV_cache;
 
-      Tensor Q = make_tensor(make_gmem_ptr(dcQ), make_layout(shape_Q, stride_q));
-      Tensor K = make_tensor(make_gmem_ptr(dcK), make_layout(shape_K, stride_k));
-      Tensor V = make_tensor(make_gmem_ptr(dcV), make_layout(shape_V, stride_v));
+      auto bshd_stride_q = cutlass::make_stride(s.head_size_qk * s.num_heads_q, Int<1>{}, s.head_size_qk, s.head_size_qk * s.num_heads_q * s.seq_len_qo);
+      auto bshd_stride_k = cutlass::make_stride(s.head_size_vo * s.num_heads_kv, Int<1>{}, s.head_size_vo, s.head_size_vo * s.num_heads_kv * s.seq_len_kv);
+      auto bshd_stride_v = cutlass::make_stride(Int<1>{}, s.head_size_vo * s.num_heads_kv, s.head_size_vo, s.head_size_vo * s.num_heads_kv * s.seq_len_kv);
+      auto bshd_stride_o = cutlass::make_stride(s.head_size_qk * s.num_heads_q, Int<1>{}, s.head_size_qk, s.head_size_qk * s.num_heads_q * s.seq_len_qo);
+
+      Tensor Q = is_BSHD  ? make_tensor(make_gmem_ptr(dcQ), make_layout(shape_Q, bshd_stride_q))
+                          : make_tensor(make_gmem_ptr(dcQ), make_layout(shape_Q, stride_q));
+      Tensor K = is_BSHD  ? make_tensor(make_gmem_ptr(dcK), make_layout(shape_K, bshd_stride_k))
+                          : make_tensor(make_gmem_ptr(dcK), make_layout(shape_K, stride_k));
+      Tensor V = is_BSHD  ? make_tensor(make_gmem_ptr(dcV), make_layout(shape_V, bshd_stride_v)) 
+                          : make_tensor(make_gmem_ptr(dcV), make_layout(shape_V, stride_v));
       Tensor K_cache = make_tensor(make_gmem_ptr(dcK_cache), make_layout(shape_K_cache, stride_k_cache));
       Tensor V_cache = make_tensor(make_gmem_ptr(dcV_cache), make_layout(shape_V_cache, stride_v_cache));
-      Tensor O = make_tensor(make_gmem_ptr(ptrO), make_layout(shape_O, stride_o));
+      Tensor O = is_BSHD  ? make_tensor(make_gmem_ptr(ptrO), make_layout(shape_O, bshd_stride_o))
+                          : make_tensor(make_gmem_ptr(ptrO), make_layout(shape_O, stride_o));
 
 
       // O accumulator types

@@ -659,8 +659,8 @@ template <class FMHAKernel, bool isVarLen = false> struct ExampleRunner {
       compat::memcpy<ElementO>(block_ref_O.get(), host_O.data(),
                                     host_O.size());
     }
-    // BHSD Layout
-    else{
+    // BHSD Layout -- default
+    else{ 
       for (int b = 0; b < batch; b++) {
         if constexpr (isVarLen) {
           auto logical_seq_shape = cutlass::fmha::collective::apply_variable_length(make_shape(shape.seq_len_qo, shape.seq_len_kv, shape.seq_len_kv_cache), b);
