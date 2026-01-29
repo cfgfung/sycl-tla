@@ -131,6 +131,7 @@ public:
     const ElementV *V_cache;
     StrideV dV_cache{};
     const float *pLSE;
+    bool is_BSHD;
   };
   using KernelParams = KernelArguments;
 
@@ -228,6 +229,7 @@ public:
     auto &p = params.kernel;
     ProblemShape const& s = p.shape;
     int head_group_q = s.num_heads_q / s.num_heads_kv;
+    bool is_BSHD = p.is_BSHD;
 
     int thr_id = int(ThreadIdxX());
     int sub_group_id = thr_id / intel::sg_size;
