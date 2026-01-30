@@ -315,9 +315,9 @@ public:
       auto stride_v_cache = is_var_len ? cutlass::make_cute_packed_stride(StrideV{}, shape_V_cache) : p.dV_cache;
 
       auto bshd_stride_q = cutlass::make_stride(s.head_size_qk * s.num_heads_q, Int<1>{}, s.head_size_qk, s.head_size_qk * s.num_heads_q * s.seq_len_qo);
-      auto bshd_stride_k = cutlass::make_stride(s.head_size_vo * s.num_heads_kv, Int<1>{}, s.head_size_vo, s.head_size_vo * s.num_heads_kv * s.seq_len_kv);
+      auto bshd_stride_k = cutlass::make_stride(s.head_size_qk * s.num_heads_kv, Int<1>{}, s.head_size_qk, s.head_size_qk * s.num_heads_kv * s.seq_len_kv);
       auto bshd_stride_v = cutlass::make_stride(Int<1>{}, s.head_size_vo * s.num_heads_kv, s.head_size_vo, s.head_size_vo * s.num_heads_kv * s.seq_len_kv);
-      auto bshd_stride_o = cutlass::make_stride(s.head_size_qk * s.num_heads_q, Int<1>{}, s.head_size_qk, s.head_size_qk * s.num_heads_q * s.seq_len_qo);
+      auto bshd_stride_o = cutlass::make_stride(s.head_size_vo * s.num_heads_q, Int<1>{}, s.head_size_vo, s.head_size_vo * s.num_heads_q * s.seq_len_qo);
 
       Tensor Q = is_BSHD  ? make_tensor(make_gmem_ptr(dcQ), make_layout(shape_Q, bshd_stride_q))
                           : make_tensor(make_gmem_ptr(dcQ), make_layout(shape_Q, stride_q));
