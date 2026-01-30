@@ -217,7 +217,7 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
              int              discard_seq_coord,
              FragARow         & tA_unscaled_rowmax,
              int              & tile_row_idx,
-             int              & rows_of_maxima,
+             const int              & rows_of_maxima,
             TensorK_cache2D const& K_cache_2D = TensorK_cache2D{},
             TensorV_cache2D const& V_cache_2D = TensorV_cache2D{}
             ) {
@@ -445,25 +445,12 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
   // These data will be used to be used to calculate the LSE pointer offset.
   template <class Shape, class ThrMMA>
   CUTLASS_DEVICE
-  void get_LSE_metadata(const int& thr_id, const Shape& tile_shape_PV, const ThrMMA& thr_mma_pv, int& rows_of_maxima, int& tile_row_idx) {
-    
-    // There is an implicit mapping that lane_id 0 will map to the first row maxima
+  void get_LSE_metadata(const int& thr_id, const Shape& tile_shape_PV, const ThrMMA& thr_mma_pv, const int& rows_of_maxima, int& tile_row_idx) {
     auto sg = compat::get_nd_item<1>().get_sub_group();
     int lane_id = static_cast<int>(sg.get_local_linear_id());
-
-    // Find the number of rows handled by 1 subgroup
     auto coord_tensor = make_identity_tensor(tile_shape_PV);
     auto thr_mma = thr_mma_pv.get_slice(thr_id);
     auto tC_coords = thr_mma.partition_C(coord_tensor);
-    int max_row_idx = -1;
-    int min_row_idx = INT_MAX;
-    for (int i = 0; i < tC_coords.size(); i++){
-      int row_idx = get<0>(tC_coords[i]);
-      max_row_idx = max(max_row_idx, row_idx);
-      min_row_idx = min(min_row_idx, row_idx);
-    }
-
-    rows_of_maxima = max_row_idx - min_row_idx + 1; // The number of existing row maximum in a subgroup
 
     tile_row_idx = -1;
     if (lane_id < rows_of_maxima){

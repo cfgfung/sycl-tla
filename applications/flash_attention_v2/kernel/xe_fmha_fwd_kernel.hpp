@@ -335,7 +335,7 @@ public:
       FragA tArA;
       FragARow tA_max, tA_sum, tS_scaled_rowmax;
       int tile_row_idx = -1;
-      int rows_of_maxima = 0;
+      int rows_of_maxima = get<0>(shape_div(TileShapeQK{}, shape(SubgroupLayoutQK{})));
 
       // Main loop
       int l_coord = is_var_len ? 0 : idx_b;
