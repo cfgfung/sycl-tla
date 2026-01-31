@@ -215,7 +215,6 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
              int              l_coord,
              int              full_tile_offset,
              int              discard_seq_coord,
-             FragARow         & tA_unscaled_rowmax,
              int              & tile_row_idx,
              const int              & rows_of_maxima,
             TensorK_cache2D const& K_cache_2D = TensorK_cache2D{},
@@ -404,7 +403,7 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
       }
 
       /* Apply softmax and scaling */
-      softmax(K == blk_k0, tSrS, tA_max, tA_sum, tArA, tA_unscaled_rowmax);
+      softmax(K == blk_k0, tSrS, tA_max, tA_sum, tArA);
       reorder(tSrS, tArP);
 
       /* GEMM 2: A += P * V, split in v dimension */
@@ -466,8 +465,7 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
           FragS    & tS,          // Softmax src/dst block
           FragSRow & tS_max,      // Softmax row-wise max accumulator
           FragSRow & tS_sum,      // Softmax row-wise sum accumulator
-          FragA    & tA,          // O accumulator (for rescaling)
-          FragSRow & tS_scaled_rowmax      // the scaled row max of S
+          FragA    & tA           // O accumulator (for rescaling)
           ) {        
 
     /* Compute row-wise maxima for this block */
@@ -480,12 +478,6 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
       ElementS new_max = sycl::max(tS_max(i), params.scale * tS_bmax(i));
       rescale(i) = sycl::native::exp2(tS_max(i) - new_max);
       tS_max(i) = new_max;
-    }
-
-    /* Find the unscaled row maxima*/
-    CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < tS_scaled_rowmax.size(); i++) {
-      tS_scaled_rowmax(i) = sycl::max(tS_scaled_rowmax(i), params.scale * tS_bmax(i));
     }
 
     /* Scale S and subtract maxima, then exponentiate */
