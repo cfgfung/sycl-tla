@@ -1374,8 +1374,6 @@ struct FMHAConfig {
     using TensorO = decltype(make_dummy_tensor(ElementO{}, StrideO{}));
     using TensorK_cache = TensorK;
     using TensorV_cache = TensorV;
-    using GmemTiledCopyK_cache = GmemTiledCopyK;
-    using GmemTiledCopyV_cache = GmemTiledCopyV;
 
     // Mainloop
     using MainloopDispatchPolicy = cutlass::fmha::XeDefault<PipelineStages>;
@@ -1384,9 +1382,7 @@ struct FMHAConfig {
         TiledMMAQK, TiledMMAPV, VTiles,
         TensorQ, TensorK, TensorV,
         TensorK_cache, TensorV_cache,
-        GmemTiledCopyQ, GmemTiledCopyK, GmemTiledCopyV,
-        GmemTiledCopyK_cache, GmemTiledCopyV_cache
-    >;
+        GmemTiledCopyQ, GmemTiledCopyK, GmemTiledCopyV>;
 
     // Epilogue
     using CollectiveEpilogue = cutlass::fmha::collective::FMHAFwdEpilogue<
@@ -1396,13 +1392,8 @@ struct FMHAConfig {
         GmemTiledCopyO
     >;
 
-    static_assert(!(persistent & Causal), "persistent SDPA kernel not support Causal yet");
-    using FMHAKernel = conditional_t<is_same_v<Scheduler, cutlass::fmha::kernel::XeFHMAIndividualPersistentTileScheduler>,
-      cutlass::fmha::kernel::XeFMHAFwdDynamicSplitKernel<
-        ProblemShapeType, CollectiveMainloop, CollectiveEpilogue, Scheduler>,
-        cutlass::fmha::kernel::XeFMHAFwdKernel<
-        ProblemShapeType, CollectiveMainloop, CollectiveEpilogue, Scheduler>
-        >;
+    static_assert(!(persistent), "persistent SDPA kernel is not implemented for PyTorch!");
+    using FMHAKernel = cutlass::fmha::kernel::XeFMHAFwdKernel<ProblemShapeType, CollectiveMainloop, CollectiveEpilogue, Scheduler>;
 
     ExampleRunner<FMHAKernel, isVarLen> runner;
 

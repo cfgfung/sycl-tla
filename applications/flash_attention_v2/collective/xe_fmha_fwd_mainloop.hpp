@@ -66,9 +66,7 @@ template <class DispatchPolicy_,
           class TensorV_cache_,
           class TiledCopyQ_ = void,   // Optional TiledCopy for loading Q
           class TiledCopyK_ = void,   // Optional TiledCopy for loading K
-          class TiledCopyV_ = void,   // Optional TiledCopy for loading V
-          class TiledCopyK_cache_ = void,
-          class TiledCopyV_cache_ = void>   // Optional TiledCopy for loading V_cache
+          class TiledCopyV_ = void>   // Optional TiledCopy for loading V
 struct FMHAFwdMainloop {
   static_assert(cutlass::detail::dependent_false<DispatchPolicy_>, "Could not find a mainloop specialization.");
 };
@@ -80,14 +78,12 @@ template <int Stages,
           class TiledMMAQK_, class TiledMMAPV_, int VTiles_,
           class TensorQ_, class TensorK_, class TensorV_,
           class TensorK_cache_, class TensorV_cache_,
-          class TiledCopyQ_, class TiledCopyK_, class TiledCopyV_,
-          class TiledCopyK_cache_, class TiledCopyV_cache_>
+          class TiledCopyQ_, class TiledCopyK_, class TiledCopyV_>
 struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
                        TiledMMAQK_, TiledMMAPV_, VTiles_,
                        TensorQ_, TensorK_, TensorV_,
                        TensorK_cache_, TensorV_cache_,
-                       TiledCopyQ_, TiledCopyK_, TiledCopyV_,
-                       TiledCopyK_cache_, TiledCopyV_cache_> {
+                       TiledCopyQ_, TiledCopyK_, TiledCopyV_> {
   //
   // Type Aliases
   //
@@ -110,13 +106,6 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
   using TiledCopyQ = conditional_t<is_void_v<TiledCopyQ_>, decltype(make_block_2d_copy_A(TiledMMAQK{}, TensorQ2D{})), TiledCopyQ_>;
   using TiledCopyK = conditional_t<is_void_v<TiledCopyK_>, decltype(make_block_2d_copy_B(TiledMMAQK{}, TensorK2D{})), TiledCopyK_>;
   using TiledCopyV = conditional_t<is_void_v<TiledCopyV_>, decltype(make_block_2d_copy_B(TiledMMAPV{}, TensorV2D{})), TiledCopyV_>;
-  using TensorK_cache = TensorK_cache_;
-  using TensorV_cache = TensorV_cache_;
-  using TensorK_cache2D = decltype(TensorK_cache_{}(append<rank_v<TensorK_cache_>>(make_coord(_,_),0)));
-  using TensorV_cache2D = decltype(TensorV_cache_{}(append<rank_v<TensorV_cache_>>(make_coord(_,_),0)));
-  using TiledCopyK_cache = conditional_t<is_void_v<TiledCopyK_cache_>, decltype(make_block_2d_copy_B(TiledMMAQK{}, TensorK_cache2D{})), TiledCopyK_cache_>;
-  using TiledCopyV_cache = conditional_t<is_void_v<TiledCopyV_cache_>, decltype(make_block_2d_copy_B(TiledMMAPV{}, TensorV_cache2D{})), TiledCopyV_cache_>;
-
   // TODO: static_asserts on TiledMMAPV here...
 
   //
@@ -216,9 +205,7 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
              int              full_tile_offset,
              int              discard_seq_coord,
              int              & tile_row_idx,
-             const int              & rows_of_maxima,
-            TensorK_cache2D const& K_cache_2D = TensorK_cache2D{},
-            TensorV_cache2D const& V_cache_2D = TensorV_cache2D{}
+             const int        & rows_of_maxima
             ) {
     using namespace sycl::ext::oneapi::this_work_item;
 
@@ -237,8 +224,6 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
     Tensor cQ = make_identity_tensor(Q_2D.shape());             // (q,d)
     Tensor cK = make_identity_tensor(K_2D.shape());             // (k,d)
     Tensor cV = make_identity_tensor(V_2D.shape());             // (v,k)
-    Tensor cK_cache = make_identity_tensor(K_cache_2D.shape()); // (k,d)
-    Tensor cV_cache = make_identity_tensor(V_cache_2D.shape()); // (v,k)
     Tensor cP = make_identity_tensor(take<0,2>(TileShapeQK{})); // (q,k)
 
     /* Partition global tensors into workgroup tiles */
@@ -247,16 +232,10 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
     Tensor gV       = local_tile(cV, tile_shape_v,  make_coord(get<1>(blk_qv),_));                    // (v,k,K)
     Tensor gV_split = local_tile(gV, TileShapePV{}, make_coord(_,_,0),            Step<X,_1,_1>{});   // (v,k,VV,K)
 
-    Tensor gK_cache       = local_tile(cK_cache, TileShapeQK{}, make_coord(_,_,_),            Step<X,_1,_1>{});   // (k,d,K,D)
-    Tensor gV_cache       = local_tile(cV_cache, tile_shape_v,  make_coord(get<1>(blk_qv),_));                    // (v,k,K)
-    Tensor gV_cache_split = local_tile(gV_cache, TileShapePV{}, make_coord(_,_,0),            Step<X,_1,_1>{});   // (v,k,VV,K)
-
     /* Create global -> register copies */
     TiledCopyQ copy_q{Q_2D};
     TiledCopyK copy_k{K_2D};
     TiledCopyV copy_v{V_2D};
-    TiledCopyK_cache copy_k_cache{K_cache_2D};
-    TiledCopyV_cache copy_v_cache{V_cache_2D};
 
     /* Create MMAs */
     TiledMMAQK mma_qk{};
@@ -266,8 +245,6 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
     auto thr_copy_q = copy_q.get_slice(thr_id);
     auto thr_copy_k = copy_k.get_slice(thr_id);
     auto thr_copy_v = copy_v.get_slice(thr_id);
-    auto thr_copy_k_cache = copy_k_cache.get_slice(thr_id);
-    auto thr_copy_v_cache = copy_v_cache.get_slice(thr_id);
     auto thr_mma_qk = mma_qk.get_slice(thr_id);
     auto thr_mma_pv = mma_pv.get_slice(thr_id);
 
@@ -275,8 +252,6 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
     auto tQgQ = thr_copy_q.partition_S(gQ);                // (atom_val,q',d',D)
     auto tKgK = thr_copy_k.partition_S(gK);                // (atom_val,k',d',K,D)
     auto tVgV = thr_copy_v.partition_S(gV_split);          // (atom_val,v',k',VV,K)
-    auto tKgK_cache = thr_copy_k_cache.partition_S(gK_cache);
-    auto tVgV_cache = thr_copy_v_cache.partition_S(gV_cache_split);
 
     /* Create register fragments for MMA and copies */
     auto tQrQ = thr_copy_q.partition_sg_fragment_D(gQ(_,_,0));
@@ -294,16 +269,12 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
     /* Create TiledCopy objects for prefetches */
     auto prefetch_q = make_block_2d_prefetch(copy_q);
     auto prefetch_k = make_block_2d_prefetch(copy_k);
-    auto prefetch_v = make_block_2d_prefetch(copy_v);
-    auto prefetch_k_cache = make_block_2d_prefetch(copy_k_cache);
-    auto prefetch_v_cache = make_block_2d_prefetch(copy_v_cache);
+    auto prefetch_v = make_block_2d_prefetch<SGPerWG::value>(tile_shape_v, V_2D);
 
     /* Partition global tensors for prefetch */
     auto pQgQ = prefetch_q.get_slice(thr_id).partition_S(gQ);
     auto pKgK = prefetch_k.get_slice(thr_id).partition_S(gK);
-    auto pVgV = prefetch_v.get_slice(thr_id).partition_S(gV_split);
-    auto pKgK_cache = prefetch_k_cache.get_slice(thr_id).partition_S(gK_cache);
-    auto pVgV_cache = prefetch_v_cache.get_slice(thr_id).partition_S(gV_cache_split);
+    auto pVgV = prefetch_v.get_slice(thr_id).partition_S(gV);
 
     // ------
     // Kernel
@@ -311,22 +282,15 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
 
     /* Initialization steps for first block: Q/K prefetch, O init */
     /* TODO: limit D prefetch for large head size, and reorder K prefetches */
-    int kblocks_cache = ceil_div(seq_len_kv_cache, get<1>(TileShapeQK{}));
-    for (int D = 0; D < size<3>(pQgQ); D++) {
-      prefetch(prefetch_q, pQgQ(_,_,_,D));
-    }
-    for (int D = 0; D < size<4>(pKgK); D++) {
-      CUTLASS_PRAGMA_UNROLL
-      for (int K = 0; K < Stages; K++) {
-        if (K < kblocks_cache) {
-          if constexpr (PagedKV) {
-            int physical_K_tile = get_physical_k_tile(K, l_coord, seq_len_kv_cache);
-            prefetch(prefetch_k_cache, pKgK_cache(_,_,_,physical_K_tile,D));
-          } else {
-            prefetch(prefetch_k_cache, pKgK_cache(_,_,_,K,D));
-          }
-        } else {
-          prefetch(prefetch_k, pKgK(_,_,_,K - kblocks_cache,D));
+    if (blk_k0 == 0) {
+      for (int D = 0; D < size<3>(pQgQ); D++) {
+        prefetch(prefetch_q, pQgQ(_,_,_,D));
+      }
+
+      for (int D = 0; D < size<4>(pKgK); D++) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int K = 0; K < Stages; K++) {
+          prefetch(prefetch_k, pKgK(_,_,_,K,D));
         }
       }
     }
@@ -340,13 +304,13 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
     bool check_remainder_k = (seq_len % get<1>(TileShapeQK{}) != 0);
 
     /* Main loop, blocked in k. */
-    for (int K = (blk_k0 > kblocks_cache ? blk_k0 : kblocks_cache); K < blk_k1; K++) {
+    for (int K = blk_k0; K < blk_k1; K++) {
       /* GEMM 1: S = K * Q */
       clear(tSrS);
       CUTLASS_PRAGMA_UNROLL
       for (int D = 0; D < size<4>(tKgK); D++) {
-        copy(copy_q, tQgQ(_,_,_,D), tQrQ);
-        copy(copy_k_cur, tKgK_cur(_,_,_,k_idx,D), tKrK);
+        copy(copy_q, tQgQ(_,_,_,D),   tQrQ);
+        copy(copy_k, tKgK(_,_,_,K,D), tKrK);
         reorder(tQrQ, tSrQ);
         reorder(tKrK, tSrK);
 
@@ -354,7 +318,7 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
       }
 
       /* V prefetch for GEMM 2 */
-      prefetch(prefetch_v, pVgV(_,_,_,K-kblocks_cache));
+      prefetch(prefetch_v, pVgV(_,_,_,K));
 
       /* Masking for remainder tiles */
       Tensor cPgP = make_identity_tensor(make_shape(seq_len_qo, seq_len_kv));
@@ -409,7 +373,7 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
       /* GEMM 2: A += P * V, split in v dimension */
       CUTLASS_PRAGMA_UNROLL
       for (int VV = 0; VV < VTiles; VV++) {
-        copy(copy_v_cur, tVgV_cur(_,_,_,VV,k_idx), tVrV);
+        copy(copy_v, tVgV(_,_,_,VV,K), tVrV);
         reorder(tVrV, tArV);
         cute::gemm(mma_pv, tArP, tArV, tArA(_,_,_,VV));
       }
@@ -417,22 +381,8 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
       /* K prefetch */
       int K_next = K + Stages;
       for (int D = 0; D < size<4>(pKgK); D++) {
-        if constexpr (is_cache) {
-          bool is_cache_next = K_next < kblocks_cache;
-          int physical_K_next = K_next;
-          if constexpr (PagedKV) {
-            if (is_cache_next) {
-              physical_K_next = get_physical_k_tile(K_next, l_coord, seq_len_kv_cache);
-            }
-          }
-          if (is_cache_next) {
-            prefetch(prefetch_k_cache, pKgK_cache(_,_,_,physical_K_next,D));
-          } else {
-            prefetch(prefetch_k, pKgK(_,_,_,K_next-kblocks_cache,D));
-          }
-        } else {
-          prefetch(prefetch_k, pKgK(_,_,_,K_next-kblocks_cache,D));
-        }
+        int K_next = K + Stages;
+        prefetch(prefetch_k, pKgK(_,_,_,K_next,D));
       }
 
       /* Get necessary metadata for LSE*/
