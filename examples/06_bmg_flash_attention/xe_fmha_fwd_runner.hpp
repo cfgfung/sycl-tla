@@ -1372,16 +1372,15 @@ struct FMHAConfig {
     using TensorK = decltype(make_dummy_tensor(ElementK{}, StrideK{}));
     using TensorV = decltype(make_dummy_tensor(ElementV{}, StrideV{}));
     using TensorO = decltype(make_dummy_tensor(ElementO{}, StrideO{}));
-    using TensorK_cache = TensorK;
-    using TensorV_cache = TensorV;
+    // using TensorK_cache = TensorK;
+    // using TensorV_cache = TensorV;
 
     // Mainloop
     using MainloopDispatchPolicy = cutlass::fmha::XeDefault<PipelineStages>;
     using CollectiveMainloop = cutlass::fmha::collective::FMHAFwdMainloop<
-        MainloopDispatchPolicy, Causal, CachedKV, PagedKV,
+        MainloopDispatchPolicy, Causal,
         TiledMMAQK, TiledMMAPV, VTiles,
         TensorQ, TensorK, TensorV,
-        TensorK_cache, TensorV_cache,
         GmemTiledCopyQ, GmemTiledCopyK, GmemTiledCopyV>;
 
     // Epilogue

@@ -53,17 +53,13 @@ using namespace cute;
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <class DispatchPolicy_,
-          bool CausalMask_,F
-          bool CachedKV_,
-          bool PagedKV_,
+          bool CausalMask_,
           class TiledMMAQK_,          // Tiling for Q*K GEMM
           class TiledMMAPV_,          // Tiling for P*V GEMM
           int VTiles_,                // # of tiles in V dimension
           class TensorQ_,             // Global Q/K/V tensors
           class TensorK_,
           class TensorV_,
-          class TensorK_cache_,
-          class TensorV_cache_,
           class TiledCopyQ_ = void,   // Optional TiledCopy for loading Q
           class TiledCopyK_ = void,   // Optional TiledCopy for loading K
           class TiledCopyV_ = void>   // Optional TiledCopy for loading V
@@ -74,15 +70,12 @@ struct FMHAFwdMainloop {
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <int Stages,
-          bool CausalMask_, bool CachedKV_, bool PagedKV_,
-          class TiledMMAQK_, class TiledMMAPV_, int VTiles_,
+          bool CausalMask_, class TiledMMAQK_, class TiledMMAPV_, int VTiles_,
           class TensorQ_, class TensorK_, class TensorV_,
-          class TensorK_cache_, class TensorV_cache_,
           class TiledCopyQ_, class TiledCopyK_, class TiledCopyV_>
-struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
+struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_,
                        TiledMMAQK_, TiledMMAPV_, VTiles_,
                        TensorQ_, TensorK_, TensorV_,
-                       TensorK_cache_, TensorV_cache_,
                        TiledCopyQ_, TiledCopyK_, TiledCopyV_> {
   //
   // Type Aliases
@@ -132,8 +125,8 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, CachedKV_, PagedKV_,
   using ElementA = typename TiledMMAPV::ValTypeD;
 
   static constexpr bool CausalMask = CausalMask_;
-  static constexpr bool CachedKV = CachedKV_;
-  static constexpr bool PagedKV = PagedKV_;
+  // static constexpr bool CachedKV = CachedKV_;
+  // static constexpr bool PagedKV = PagedKV_;
 
   // User-facing arguments
   struct Arguments {
