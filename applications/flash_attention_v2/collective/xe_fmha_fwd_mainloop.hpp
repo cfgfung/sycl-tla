@@ -313,19 +313,21 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_,
       /* V prefetch for GEMM 2 */
       prefetch(prefetch_v, pVgV(_,_,_,K));
 
-      /* Masking for remainder tiles */
+      /* Masking */
       Tensor cPgP = make_identity_tensor(make_shape(seq_len_qo, seq_len_kv));
       Tensor gP = local_tile(cPgP, take<0,2>(TileShapeQK{}), make_coord(get<0>(blk_qv), K));
       auto cS_thread = thr_mma_qk.partition_C(gP);
 
-      int rows_per_sg = get<0>(shape_div(TileShapeQK{}, shape(SubgroupLayoutQK{})));
-      CUTLASS_PRAGMA_UNROLL
-      for (int i = 0; i < tSrS.size(); ++i) {
-        int row_idx = get<0>(cS_thread(i));
-        int col_idx = get<1>(cS_thread(i));
-        if (col_idx >= seq_len_kv) {
-          tSrS(i) = ElementS(-INFINITY);
-        }
+      /* Masking for remainder tiles */
+      if (K == blk_k1 - 1){
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < tSrS.size(); ++i) {
+          int row_idx = get<0>(cS_thread(i));
+          int col_idx = get<1>(cS_thread(i));
+          if (col_idx >= seq_len_kv) {
+            tSrS(i) = ElementS(-INFINITY);
+          }
+        }      
       }
 
       /* Causal masking */
@@ -377,14 +379,14 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_,
         int K_next = K + Stages;
         prefetch(prefetch_k, pKgK(_,_,_,K_next,D));
       }
-
-      /* Get necessary metadata for LSE*/
-      get_LSE_metadata(thr_id, TileShapePV{}, thr_mma_pv, rows_of_maxima, tile_row_idx);
     }
+
+    /* Get necessary metadata for LSE*/
+    get_LSE_metadata(thr_id, TileShapePV{}, thr_mma_pv, rows_of_maxima, tile_row_idx);
   }
 
   // Find the metadata for constructing the mapping between lane_id, local row index and row_maxima for this thread
-  // These data will be used to be used to calculate the LSE pointer offset.
+  // These data will be used to calculate the LSE pointer offset.
   template <class Shape, class ThrMMA>
   CUTLASS_DEVICE
   void get_LSE_metadata(const int& thr_id, const Shape& tile_shape_PV, const ThrMMA& thr_mma_pv, const int& rows_of_maxima, int& tile_row_idx) {
@@ -394,7 +396,7 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_,
     auto thr_mma = thr_mma_pv.get_slice(thr_id);
     auto tC_coords = thr_mma.partition_C(coord_tensor);
 
-    tile_row_idx = -1;
+    tile_row_idx = -1; // means invalid row idx
     if (lane_id < rows_of_maxima){
       auto coord = tC_coords(lane_id); 
       tile_row_idx = get<0>(coord);
