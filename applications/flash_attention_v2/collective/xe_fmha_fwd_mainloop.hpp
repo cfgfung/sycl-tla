@@ -415,6 +415,7 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_,
     auto tS_bmax = reduce<1>(tS, sycl::maximum{});
 
     /* Update (scaled) maxima */
+    FragSRow rescale;
     auto tS_prev_max = tS_max;
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tS_max.size(); i++) {
